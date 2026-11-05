@@ -1,9 +1,0 @@
-[submodule "tests/s1disasm"]
-	path = tests/s1disasm
-	url = https://github.com/sonicretro/s1disasm
-[submodule "tests/spindisasm"]
-	path = tests/spindisasm
-	url = https://github.com/sonicretro/spindisasm
-[submodule "tests/Sonic-2-Aug-21st-Disassembly"]
-	path = tests/Sonic-2-Aug-21st-Disassembly
-	url = https://github.com/Clownacy/Sonic-2-Aug-21st-Disassembly

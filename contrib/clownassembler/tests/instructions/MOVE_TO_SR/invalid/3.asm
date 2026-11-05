@@ -1,1 +1,0 @@
-	move.w	usp,sr
