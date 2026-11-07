@@ -207,6 +207,7 @@ if(PARADOX_BUILD_DOCS)
       WORKING_DIRECTORY "${PM_DIR}"
       COMMENT "Generating ParadoxEngine API documentation with Doxygen"
       VERBATIM)
+    install(DIRECTORY "${PM_DOXYGEN_OUT}/html/" DESTINATION "${CMAKE_INSTALL_DOCDIR}/ParadoxEngine" OPTIONAL)
   else()
     message(STATUS "PARADOX_BUILD_DOCS is ON but Doxygen was not found: no ParadoxEngineDocs target")
   endif()
