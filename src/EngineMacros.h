@@ -2,11 +2,11 @@
 
 #include "EngineConstants.h"
 
-//Planes
-// The byte offset in a plane of the entry at tile (x, y)
+/// Planes
+/// The byte offset in a plane of the entry at tile (x, y)
 #define MAP_PLANE(x, y) ((((y) * PLANE_WIDTH + (x)) << 1))
 
-//Assertion
+/// Assertion
 #define GLUE(a, b) a ## b
 #define GLUE2(a, b) GLUE(a, b)
 
@@ -16,7 +16,7 @@
 	#define STATIC_ASSERT(cond, msg) typedef char GLUE2(static_assertion_failed, __LINE__)[(cond) ? 1 : -1]
 #endif
 
-//Alignment
+/// Alignment
 #if defined(__GNUC__)
 	#define ALIGNED2 __attribute__((aligned(2)))
 	#define ALIGNED4 __attribute__((aligned(4)))
@@ -35,7 +35,7 @@
 	#define ALIGNED16
 #endif
 
-//Byte-swapping
+/// Byte-swapping
 #ifdef SCP_LIL_ENDIAN
 	#define LESWAP_16(x) (((x) << 8) | ((x) >> 8))
 	#define LESWAP_32(x) ((((x) << 24) & 0xFF000000) | (((x) << 8) & 0x00FF0000) | (((x) >> 8) & 0x0000FF00) | (((x) >> 24) & 0x000000FF))
@@ -46,5 +46,5 @@
 
 #define MAKE_ART_TILES(addr, pal, pri) (((pri & 1) << 15) | ((pal & 3) << 13) | (addr & tile_mask))
 
-//Helper macros
+/// Helper macros
 #define POSITIVE_MOD(x, y) (((x) % (y) + (y)) % (y))
