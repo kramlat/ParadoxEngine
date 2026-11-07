@@ -1,0 +1,18 @@
+# Doxygen settings for ParadoxEngine; CMake fills in the @...@ values (see the "Documentation" part of paradoxmake.cmake).
+PROJECT_NAME           = "ParadoxEngine"
+PROJECT_NUMBER         = @PM_VERSION@
+OUTPUT_DIRECTORY       = @PM_DOXYGEN_OUT@
+INPUT                  = @PM_DIR@/src @PM_DIR@/README.md
+USE_MDFILE_AS_MAINPAGE = @PM_DIR@/README.md
+FILE_PATTERNS          = *.h *.c *.cpp *.md
+RECURSIVE              = YES
+EXCLUDE                = @PM_DIR@/src/Resource
+EXTRACT_ALL            = YES
+EXTRACT_STATIC         = NO
+OPTIMIZE_OUTPUT_FOR_C  = YES
+SOURCE_BROWSER         = YES
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
+HAVE_DOT               = @PM_DOXYGEN_HAVE_DOT@
+QUIET                  = YES
+WARN_IF_UNDOCUMENTED   = NO

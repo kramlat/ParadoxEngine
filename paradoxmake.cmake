@@ -185,3 +185,29 @@ function(pm_add_song TARGET IN_DIR OUT_DIR JSONC_FILE ARRAY_NAME)
 
   target_sources(${TARGET} PRIVATE "${OUT_JSON_H}")
 endfunction()
+
+# Documentation (optional) #
+# ##############################################################################
+# Off by default. -DPARADOX_BUILD_DOCS=ON adds the "ParadoxEngineDocs" target (HTML in <build>/docs/ParadoxEngine/html) when Doxygen is installed;
+# without Doxygen it says so and carries on. Graphs are drawn only if Graphviz's dot is found.
+option(PARADOX_BUILD_DOCS "Add a Doxygen target for ParadoxEngine's API documentation" OFF)
+if(PARADOX_BUILD_DOCS)
+  find_package(Doxygen QUIET OPTIONAL_COMPONENTS dot)
+  if(DOXYGEN_FOUND)
+    set(PM_VERSION "${PROJECT_VERSION}")
+    set(PM_DOXYGEN_OUT "${CMAKE_BINARY_DIR}/docs/ParadoxEngine")
+    set(PM_DOXYGEN_HAVE_DOT NO)
+    if(DOXYGEN_DOT_FOUND)
+      set(PM_DOXYGEN_HAVE_DOT YES)
+    endif()
+    configure_file("${PM_DIR}/docs/Doxyfile.in" "${PM_DOXYGEN_OUT}/Doxyfile" @ONLY)
+    add_custom_target(ParadoxEngineDocs
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${PM_DOXYGEN_OUT}"
+      COMMAND ${DOXYGEN_EXECUTABLE} "${PM_DOXYGEN_OUT}/Doxyfile"
+      WORKING_DIRECTORY "${PM_DIR}"
+      COMMENT "Generating ParadoxEngine API documentation with Doxygen"
+      VERBATIM)
+  else()
+    message(STATUS "PARADOX_BUILD_DOCS is ON but Doxygen was not found: no ParadoxEngineDocs target")
+  endif()
+endif()
