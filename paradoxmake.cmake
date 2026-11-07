@@ -36,9 +36,10 @@ if(TRUE)
   # to whatever links ParadoxEngine (Sonic itself, and SonicTests).
   target_link_libraries(ParadoxEngine PUBLIC SDL2::SDL2)
 
-  # The window: a QMainWindow (menu bar) with the game frame drawn as a texture on a
-  # QOpenGLWidget; see engine/Backend/Qt/QtHost.h.
-  find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGLWidgets Multimedia)
+  # The window: a QMainWindow (menu bar) with the game frame drawn as a texture through Qt's RHI
+  # (Vulkan, else OpenGL) or by the CPU; see engine/Backend/Qt/QtHost.h and PictureView.h.
+  set(QT_NO_PRIVATE_MODULE_WARNING ON) # (GuiPrivate is for QRhi only, which Qt calls semi-public: its API may change between minor versions)
+  find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGLWidgets Multimedia ShaderTools GuiPrivate)
   find_package(yaml-cpp REQUIRED) # the settings file (engine/Backend/Qt/Settings.cpp)
   target_sources(ParadoxEngine PRIVATE "${PM_DIR}/src/Backend/Qt/QtHost.cpp" "${PM_DIR}/src/Backend/Qt/QtHost.h"
                                 "${PM_DIR}/src/Backend/Qt/ConsoleDrawer.cpp" "${PM_DIR}/src/Backend/Qt/ConsoleDrawer.h"
@@ -50,8 +51,18 @@ if(TRUE)
                                 "${PM_DIR}/src/Backend/Qt/DebugViewers.cpp" "${PM_DIR}/src/Backend/Qt/DebugViewers.h"
                                 "${PM_DIR}/src/Backend/Qt/SmpsInspector.cpp" "${PM_DIR}/src/Backend/Qt/SmpsInspector.h"
                                 "${PM_DIR}/src/Backend/Qt/HelpWindow.cpp" "${PM_DIR}/src/Backend/Qt/HelpWindow.h"
+                                "${PM_DIR}/src/Backend/Qt/PictureView.cpp" "${PM_DIR}/src/Backend/Qt/PictureView.h"
+                                "${PM_DIR}/src/Backend/Qt/GpuVdp.cpp" "${PM_DIR}/src/Backend/Qt/GpuVdp.h"
+                                "${PM_DIR}/src/Backend/Qt/TileGpu.cpp" "${PM_DIR}/src/Backend/Qt/TileGpu.h"
                                 "${PM_DIR}/src/Backend/Qt/ControlsDialog.cpp" "${PM_DIR}/src/Backend/Qt/ControlsDialog.h")
   target_link_libraries(ParadoxEngine PUBLIC Qt6::Widgets Qt6::OpenGLWidgets Qt6::Multimedia yaml-cpp::yaml-cpp)
+  target_link_libraries(ParadoxEngine PRIVATE Qt6::GuiPrivate) # (QRhi: <rhi/qrhi.h>, semi-public since Qt 6.6)
+  # The picture through the GPU (PictureView.cpp: Qt's RHI, Vulkan first): its shaders, baked for every RHI backend by qsb into the library's resources
+  qt_add_shaders(ParadoxEngine "paradox_shaders" PREFIX "/paradox/shaders" BASE "${PM_DIR}/src/Backend/Qt/shaders"
+                 FILES "${PM_DIR}/src/Backend/Qt/shaders/picture.vert" "${PM_DIR}/src/Backend/Qt/shaders/picture.frag")
+  # (the VDP's compute shader and the terrain editor's tiles, which read storage buffers: GLSL 430 for OpenGL, as those need; the other backends' as ever)
+  qt_add_shaders(ParadoxEngine "paradox_compute_shaders" PREFIX "/paradox/shaders" BASE "${PM_DIR}/src/Backend/Qt/shaders" GLSL "430" HLSL 50 MSL 12
+                 FILES "${PM_DIR}/src/Backend/Qt/shaders/vdp.comp" "${PM_DIR}/src/Backend/Qt/shaders/tiles.vert" "${PM_DIR}/src/Backend/Qt/shaders/tiles.frag")
   target_compile_definitions(ParadoxEngine PRIVATE SONIC_VERSION="${PROJECT_VERSION}")
 
   # Help > About is KDE's standard About dialog (KAboutApplicationDialog) where the KDE Frameworks are installed, and a plain

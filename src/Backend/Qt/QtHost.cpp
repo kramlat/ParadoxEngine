@@ -11,6 +11,7 @@
 #include "ControlsDialog.h"
 #include "ConsoleDrawer.h"
 #include "Settings.h"
+#include "PictureView.h"
 #include "../../DebugPeek.h"
 #include "../../DebugLog.h"
 extern "C" {
@@ -34,7 +35,6 @@ extern "C" {
 #include <QStatusBar>
 #include <QGuiApplication>
 #include <QWidgetAction>
-#include <QOpenGLWidget>
 #include <QPainter>
 #include <QPixmap>
 #include <QSurfaceFormat>
@@ -118,19 +118,60 @@ uint8_t g_keys[SDL_NUM_SCANCODES];
 std::deque<QtHost_KeyEvent> g_key_events;
 bool g_should_quit = false;
 
-// The drawing widget: keeps the latest frame and draws it, aspect-correct and
-// centred (black bars), as a texture.
-class GameView : public QOpenGLWidget {
+// What is drawn over the picture (the level editor's marks): a see-through layer the size of the view, painted with QPainter whichever way the picture itself is drawn
+class PictureOverlay : public QWidget {
 public:
-	explicit GameView(QWidget *parent = nullptr) : QOpenGLWidget(parent) {
-		setFocusPolicy(Qt::StrongFocus);
-		setMouseTracking(true); // (the level editor shows where the pointer is in the level)
-		QSurfaceFormat fmt;
-		fmt.setSwapInterval(0); // the game paces itself (Render.c's frame clock)
-		setFormat(fmt);
+	explicit PictureOverlay(QWidget *parent) : QWidget(parent) {
+		setAttribute(Qt::WA_TransparentForMouseEvents);
+		setAttribute(Qt::WA_NoSystemBackground);
+		setFocusPolicy(Qt::NoFocus);
 	}
 
-	void setFrame(const QImage &image) { frame = image; }
+	std::function<void(QPainter *)> paint;
+
+protected:
+	void paintEvent(QPaintEvent *) override {
+		if (!paint)
+			return;
+		QPainter p(this);
+		paint(&p);
+	}
+};
+
+// The drawing widget: keeps the latest frame and has it drawn, aspect-correct and centred (black bars), by its picture surface (PictureView.h: the GPU, else the CPU), with the
+// overlay above it. It takes the keys and the mouse; the surface and the overlay take none.
+class GameView : public QWidget {
+public:
+	explicit GameView(QWidget *parent = nullptr) : QWidget(parent) {
+		setFocusPolicy(Qt::StrongFocus);
+		setMouseTracking(true); // (the level editor shows where the pointer is in the level)
+		setAttribute(Qt::WA_OpaquePaintEvent); // (the surface covers it all)
+		surface = PictureView_Make(this);
+		overlay = new PictureOverlay(this);
+		overlay->paint = [this](QPainter *p) {
+			if (on_overlay && !picture.isEmpty()) {
+				const QRectF dest = PictureView_Fit(QSizeF(size()), picture);
+				on_overlay(p, dest, dest.width() / picture.width());
+			}
+		};
+	}
+
+	void setFrame(const QImage &image) {
+		frame = image;
+		picture = frame.size();
+		surface->setFrame(frame);
+		if (on_overlay)
+			overlay->update();
+	}
+	// A frame the GPU draws (VDP_CaptureFrame's words, `size` its pixels): false when the surface cannot. The picture keeps the size the CPU's frames have (the overlay and the mouse are in those pixels)
+	QImage gpuPicture() { return surface->gpuPicture(); }
+	bool setGpuFrame(const uint32_t *words, size_t count, QSize size) {
+		if (!surface->setGpuFrame(words, count, size))
+			return false;
+		if (on_overlay)
+			overlay->update();
+		return true;
+	}
 	bool saveFrame(const QString &path) const { return frame.save(path); }
 
 	std::function<void()> on_console_key; // the backtick key: opens/closes the console drawer
@@ -138,30 +179,16 @@ public:
 	std::function<void(QPainter *, const QRectF &, double)> on_overlay; // drawn over the picture
 	std::function<void()> on_resized;
 
-	QSize sizeHint() const override { return frame.size(); }
+	QSize sizeHint() const override { return picture; }
 
 protected:
-	void paintGL() override {
-		QPainter p(this);
-		p.fillRect(rect(), Qt::black);
-		if (frame.isNull())
-			return;
-		double scale = qMin(double(width()) / frame.width(), double(height()) / frame.height());
-		double w = frame.width() * scale, h = frame.height() * scale;
-		QRectF dest((width() - w) / 2, (height() - h) / 2, w, h);
-		p.setRenderHint(QPainter::SmoothPixmapTransform, false); // crisp pixels, like the SDL window
-		p.drawImage(dest, frame);
-		if (on_overlay)
-			on_overlay(&p, dest, scale);
-	}
-
 	// The picture's pixel under a point of the widget (the picture is centred and scaled, with bars round it)
 	bool toPicture(const QPoint &at, int &x, int &y) const {
-		if (frame.isNull())
+		if (picture.isEmpty())
 			return false;
-		const double scale = qMin(double(width()) / frame.width(), double(height()) / frame.height());
-		x = int(std::floor((at.x() - (width() - frame.width() * scale) / 2) / scale));
-		y = int(std::floor((at.y() - (height() - frame.height() * scale) / 2) / scale));
+		const double scale = qMin(double(width()) / picture.width(), double(height()) / picture.height());
+		x = int(std::floor((at.x() - (width() - picture.width() * scale) / 2) / scale));
+		y = int(std::floor((at.y() - (height() - picture.height() * scale) / 2) / scale));
 		return true;
 	}
 
@@ -169,7 +196,7 @@ protected:
 		int x, y;
 		if (on_mouse && toPicture(e->pos(), x, y) && on_mouse(0, e->button(), x, y))
 			return;
-		QOpenGLWidget::mousePressEvent(e);
+		QWidget::mousePressEvent(e);
 	}
 
 	void mouseMoveEvent(QMouseEvent *e) override {
@@ -179,14 +206,14 @@ protected:
 		} else if (on_mouse && e->buttons() != Qt::NoButton && toPicture(e->pos(), x, y) && on_mouse(1, e->buttons() & Qt::LeftButton ? Qt::LeftButton : Qt::RightButton, x, y)) {
 			return;
 		}
-		QOpenGLWidget::mouseMoveEvent(e);
+		QWidget::mouseMoveEvent(e);
 	}
 
 	void mouseReleaseEvent(QMouseEvent *e) override {
 		int x, y;
 		if (on_mouse && toPicture(e->pos(), x, y) && on_mouse(2, e->button(), x, y))
 			return;
-		QOpenGLWidget::mouseReleaseEvent(e);
+		QWidget::mouseReleaseEvent(e);
 	}
 
 	void keyPressEvent(QKeyEvent *e) override {
@@ -215,18 +242,23 @@ protected:
 	}
 
 	void resizeEvent(QResizeEvent *e) override {
-		QOpenGLWidget::resizeEvent(e);
+		QWidget::resizeEvent(e);
+		surface->widget()->setGeometry(rect());
+		overlay->setGeometry(rect()); // (made after the surface, so above it; the console drawer, made after both, stays above them)
 		if (on_resized)
 			on_resized();
 	}
 
 	void focusOutEvent(QFocusEvent *e) override {
 		memset(g_keys, 0, sizeof(g_keys)); // don't leave keys stuck down when focus moves away
-		QOpenGLWidget::focusOutEvent(e);
+		QWidget::focusOutEvent(e);
 	}
 
 private:
 	QImage frame;
+	QSize picture; // (the CPU's frames' size, which the GPU's keep)
+	PictureSurface *surface;
+	PictureOverlay *overlay;
 };
 
 class MainWindow : public QMainWindow {
@@ -529,6 +561,7 @@ private:
 		connect(countdown_action, &QAction::triggered, this, [this] { DemoTools::CountdownDialog(this); });
 		tools->addSeparator();
 		connect(tools->addAction("Level Editor"), &QAction::triggered, this, [this] { LevelEditor::Show(this); });
+		connect(tools->addAction("Keymaker"), &QAction::triggered, this, [this] { LevelEditor::ShowKeymaker(this); });
 		connect(tools->addAction("SMPS Inspector"), &QAction::triggered, this, [this] { SmpsInspector::Show(this); });
 
 		BuildAudioMenu();
@@ -568,6 +601,9 @@ int QtHost_Init(const char *title, int width, int height, const uint8_t *icon_rg
 	static int argc = 1;
 	static char arg0[] = "paradox";
 	static char *argv[] = { arg0, nullptr };
+	QSurfaceFormat format = QSurfaceFormat::defaultFormat();
+	format.setSwapInterval(0); // the game paces itself (Render.c's frame clock): the window's presenting (the GPU picture's swap chain included) does not wait for the display
+	QSurfaceFormat::setDefaultFormat(format);
 	g_app = new QApplication(argc, argv);
 
 	Settings::Load(); // before the window: the menus read the live audio state it applies
@@ -678,6 +714,34 @@ void QtHost_PumpEvents(void) {
 		g_window->UpdateToolStatus();
 		DemoTools::Poll(g_window);
 		LevelEditor::Poll();
+		// SONIC_QT_EDITOR_GRAB=<frame>: opens the level editor at that frame and saves a picture of each of its tabs as <SONIC_QT_GRAB>-editor-tab<n>.png (nothing is edited or saved);
+		// SONIC_QT_EDITOR_SELECT, SONIC_QT_BLOCKNIGHT, SONIC_QT_PLANEVIEW and SONIC_QT_PLANEZOOM pick what they show
+		if (const char *grab_at = getenv("SONIC_QT_EDITOR_GRAB")) {
+			static int grab_frame = 0;
+			grab_frame++;
+			if (grab_frame == atoi(grab_at))
+				LevelEditor::Show(g_window);
+			int block = 0, chunk = 0; // SONIC_QT_EDITOR_SELECT=<block>,<chunk>: what the tabs show (a selection, not an edit)
+			if (grab_frame == atoi(grab_at) + 10 && getenv("SONIC_QT_EDITOR_SELECT") != nullptr && sscanf(getenv("SONIC_QT_EDITOR_SELECT"), "%d,%d", &block, &chunk) == 2)
+				TerrainEditor::SelectForTest(block, chunk);
+			int km_zone = 0, km_act = 0; char km_code[16] = ""; // SONIC_QT_KEYMAKER=<zone>,<act>,<code>: starts a Keymaker level (a blank one), as the dialog's button does
+			if (grab_frame == atoi(grab_at) + 5 && getenv("SONIC_QT_KEYMAKER") != nullptr && sscanf(getenv("SONIC_QT_KEYMAKER"), "%d,%d,%15s", &km_zone, &km_act, km_code) == 3)
+				LevelEditor::KeymakerForTest(g_window, km_zone, km_act, km_code);
+			int import_zone = 0, import_act = 0, import_parts = 31; // SONIC_QT_EDITOR_IMPORT=<zone>,<act>: loads that zone's terrain, all of it, into the level (the Import tab's button)
+			if (grab_frame == atoi(grab_at) + 15 && getenv("SONIC_QT_EDITOR_IMPORT") != nullptr && sscanf(getenv("SONIC_QT_EDITOR_IMPORT"), "%d,%d,%d", &import_zone, &import_act, &import_parts) >= 2) {
+				const char *why = Game_EditorImportTerrain(import_zone, import_act, unsigned(import_parts));
+				fprintf(stderr, "import: %s\n", why ? why : "done");
+				Editor_RedrawLevel();
+			}
+			if (grab_frame == atoi(grab_at) + 30 && getenv("SONIC_QT_GRAB") != nullptr) {
+				LevelEditor::GrabTabs(QString(getenv("SONIC_QT_GRAB")) + "-editor");
+				g_window->grab().save(QString(getenv("SONIC_QT_GRAB")) + "-editor-picture.png"); // (the picture with the editor's marks over it)
+			}
+			if (grab_frame == atoi(grab_at) + 150 && getenv("SONIC_QT_GRAB") != nullptr)
+				g_window->grab().save(QString(getenv("SONIC_QT_GRAB")) + "-editor-picture-later.png");
+			if (grab_frame == atoi(grab_at) + 90 && getenv("SONIC_QT_GRAB") != nullptr) // (a second set, later: what animates has moved)
+				LevelEditor::GrabTabs(QString(getenv("SONIC_QT_GRAB")) + "-editor-later");
+		}
 		// SONIC_QT_EDITOR=<pixel x>,<pixel y>[,<frame>]: opens the level editor at frame 200 (or <frame>), clicks the picture there to place an object and saves (for the automated checks)
 		static const char *editor_hook = getenv("SONIC_QT_EDITOR");
 		static int editor_frame = 0;
@@ -790,6 +854,33 @@ void QtHost_Present(const void *pixels, int pitch) {
 	             g_window->view->sizeHint().height(), pitch, QImage::Format_RGBX8888);
 	g_window->view->setFrame(frame.copy());
 	g_window->view->repaint();
+}
+
+bool QtHost_GpuFrames(void) {
+	return g_window != nullptr && PictureView_Drawing() != PictureDrawing::Cpu && getenv("SONIC_QT_FRAME") == nullptr;
+}
+
+bool QtHost_PresentGpu(const uint32_t *words, size_t count, int width, int rows) {
+	if (g_window == nullptr || !g_window->view->setGpuFrame(words, count, QSize(width, rows)))
+		return false;
+	g_window->view->repaint();
+	return true;
+}
+
+bool QtHost_GpuPicture(uint8_t *rgb, int width, int rows) {
+	if (g_window == nullptr)
+		return false;
+	const QImage picture = g_window->view->gpuPicture();
+	if (picture.width() != width || picture.height() != rows)
+		return false;
+	for (int y = 0; y < rows; y++)
+		for (int x = 0; x < width; x++) {
+			const QRgb c = picture.pixel(x, y);
+			*rgb++ = uint8_t(qRed(c));
+			*rgb++ = uint8_t(qGreen(c));
+			*rgb++ = uint8_t(qBlue(c));
+		}
+	return true;
 }
 
 void QtHost_SetPictureSize(int width, int height, bool resize_window) {

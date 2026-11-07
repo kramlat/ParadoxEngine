@@ -79,6 +79,18 @@ void Game_EditorSetMode(bool editing);
 // The built-in level editor changed the level's blocks or chunks: draws its planes again from them. A weak default does nothing.
 void Game_EditorRedraw(void);
 
+// The terrain editor loads another zone's terrain into the level being edited, minus its animation (nothing of the zone's animated art or palette cycles comes with it): `parts` is what to take, EDITOR_IMPORT_*.
+// Returns NULL when done, or why not. Game_EditorZoneHasTerrain says whether a zone and act have terrain to take. A weak default takes nothing.
+#define EDITOR_IMPORT_TILES   1
+#define EDITOR_IMPORT_BLOCKS  2
+#define EDITOR_IMPORT_CHUNKS  4
+#define EDITOR_IMPORT_PALETTE 8
+#define EDITOR_IMPORT_SOLIDS  16
+const char *Game_EditorImportTerrain(int zone, int act, unsigned parts);
+bool Game_EditorZoneHasTerrain(int zone, int act);
+// The sprite art lists and the palette a zone and act's level load block names (the numbers the table has them as), for the C row the editor makes for a level with an overlay. False when the zone has none.
+bool Game_EditorLoadBlockInfo(int zone, int act, int *plc1, int *plc2, int *pal);
+
 // The editor keeps the checkpoint state (last_lamp) the game had when it opened and puts it back when it takes the level, gives it back, or is left behind by another level: 0 saves it, 1 restores it. A weak default does nothing.
 void Game_EditorLamp(int action);
 

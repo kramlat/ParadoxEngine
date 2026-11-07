@@ -9,6 +9,7 @@
 // Plain C interface so the C backend files (Render.c, Input.c) can use it.
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "../PeekData.h"
@@ -38,6 +39,14 @@ bool QtHost_ShouldQuit(void);
 
 // Shows a new frame: pixels are width*height 32-bit, bytes R,G,B,X per pixel.
 void QtHost_Present(const void *pixels, int pitch);
+
+// Whether the window draws frames on the GPU (the VDP's compute shader: Qt's RHI on Vulkan or OpenGL). Not when the picture is drawn by the CPU, or when its frames are saved
+// (SONIC_QT_FRAME: those are the CPU's).
+bool QtHost_GpuFrames(void);
+// Shows a frame the GPU draws: VDP_CaptureFrame's words (copied), its picture width x rows pixels. False when the window cannot after all (the device has no compute).
+bool QtHost_PresentGpu(const uint32_t *words, size_t count, int width, int rows);
+// The last GPU frame's picture as R,G,B bytes, `width` x `rows` (the console's screenshot): false when the last frame was not the GPU's, or is another size
+bool QtHost_GpuPicture(uint8_t *rgb, int width, int rows);
 
 void QtHost_ToggleFullscreen(void);
 

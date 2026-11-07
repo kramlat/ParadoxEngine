@@ -4,12 +4,20 @@
 #include "GameInterface.h"
 #include "../../DebugPeek.h"
 #include "../../EditorLive.h"
+extern "C" {
+#include "../../EditorTerrain.h"
+}
 
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 
+#include <QApplication>
 #include <QCloseEvent>
 #include <QCheckBox>
+#include <QClipboard>
+#include <QComboBox>
+#include <QGuiApplication>
 #include <QDesktopServices>
 #include <QDialog>
 #include <QDir>
@@ -226,8 +234,11 @@ void StopEditing() {
 bool Save() {
 	if (!editor_open)
 		return false;
-	const QString slot = QString("%1/slot%2").arg(OutputFolder(), HexText(editor_session.zone, 2));
-	const char *level_name = Peek_LevelName(editor_session.zone, editor_session.act);
+	const bool keymaker_level = Editor_HasTarget(); // (a zone of the Keymaker's: named by its own zone number and code)
+	const int save_zone = keymaker_level ? Editor_TargetZone() : editor_session.zone, save_act = keymaker_level ? Editor_TargetAct() : editor_session.act;
+	const QString slot = QString("%1/slot%2").arg(OutputFolder(), HexText(save_zone, 2));
+	const QByteArray keymaker_name = QString("%1%2").arg(Editor_TargetCode()).arg(save_act + 1).toLatin1();
+	const char *level_name = keymaker_level ? keymaker_name.constData() : Peek_LevelName(editor_session.zone, editor_session.act);
 	auto path = [&](const char *folder, const char *fallback) {
 		if (folder != nullptr && level_name != nullptr)
 			return QString("%1/%2/%3").arg(slot, folder, level_name);
@@ -249,7 +260,7 @@ bool Save() {
 		ok = ok && file.open(QIODevice::WriteOnly) && file.write(*data[i]) == data[i]->size();
 	}
 	QString terrain_message;
-	ok = TerrainEditor::Save(slot, editor_session.zone, editor_session.act, &terrain_message) && ok;
+	ok = TerrainEditor::Save(slot, save_zone, save_act, &terrain_message) && ok;
 	if (ok) {
 		editor_session.level.dirty = false;
 		SetMessage(QString("Saved to %1 (copy its files into res/ to keep them).").arg(slot));
@@ -471,6 +482,165 @@ EditorObject NewObject(int x, int y) {
 
 } // namespace
 
+
+// ---- Keymaker mode: a level made from nothing, in any zone that is empty, even one past the end of the game's zone array ----
+// The game keeps running the level the editor was opened in (the game's tables have no such zone); what the zone number and the code you give only do is name the files the editor saves and the C code it copies,
+// so that the zone can be added to the tables. The terrain is a blank one with a floor (or another zone's, loaded from it), the objects and rings none.
+namespace {
+QDialog *keymaker = nullptr;
+struct KeymakerWidgets {
+	QSpinBox *zone;
+	QComboBox *act, *start;
+	QLineEdit *code;
+	QLabel *info;
+} km;
+
+QString ZoneStatus(int zone, int act) {
+	EditorPeek peek;
+	Peek_EditorState(&peek);
+	if (zone >= peek.zone_count)
+		return QString("Zone $%1 is outside the game's zone array (it has %2 zones): the tables need to grow to hold it. The files and the C code are made all the same.").arg(zone, 2, 16, QChar('0')).arg(peek.zone_count).toUpper();
+	if (Game_EditorZoneHasTerrain(zone, act)) {
+		const char *name = Peek_ZoneName(zone);
+		return QString("Zone $%1 has a level already (%2): its files would be written over if you copy them into res/.").arg(zone, 2, 16, QChar('0')).arg(name ? name : "no name").toUpper();
+	}
+	return QString("Zone $%1 is an empty slot of the array.").arg(zone, 2, 16, QChar('0')).toUpper();
+}
+
+QString KeymakerCode() {
+	QString code;
+	for (const QChar c : km.code->text())
+		if (c.isLetterOrNumber() && c.unicode() < 128)
+			code += c.toUpper();
+	return code.left(8);
+}
+
+void KeymakerStart() {
+	const QString code = KeymakerCode();
+	if (code.isEmpty() || code[0].isDigit()) {
+		km.info->setText("Give the zone a code first: letters and digits, a letter first (WNT for a winter zone).");
+		return;
+	}
+	EditorPeek peek;
+	Peek_EditorState(&peek);
+	if (!peek.in_level) {
+		km.info->setText("Start a level first: the editor works on the level that is running (any will do: its terrain, objects and rings are replaced).");
+		return;
+	}
+	if (getenv("SONIC_QT_KEYMAKER") == nullptr && QMessageBox::question(km.zone, "Keymaker", "This replaces the running level's terrain, objects and rings with a new level's (nothing is saved to the game's own files). Go on?") != QMessageBox::Yes)
+		return;
+	if (!editor_open)
+		StartEditing();
+	if (!editor_open)
+		return;
+	const int zone = km.zone->value(), act = km.act->currentIndex();
+	QString message;
+	if (km.start->currentIndex() == 0) {
+		if (!EditorTerrain_MakeBlank()) {
+			km.info->setText("This level has no terrain to start over (it needs its tile, block and chunk buffers).");
+			return;
+		}
+	} else {
+		const char *why = Game_EditorImportTerrain(km.start->currentData().toInt(), 0, EDITOR_IMPORT_TILES | EDITOR_IMPORT_BLOCKS | EDITOR_IMPORT_CHUNKS | EDITOR_IMPORT_SOLIDS | EDITOR_IMPORT_PALETTE);
+		if (why != nullptr) {
+			km.info->setText(QString("Cannot load that zone: %1.").arg(why));
+			return;
+		}
+		size_t bytes;
+		uint8_t *layout = Editor_Layout(&bytes);
+		memset(layout, 0, bytes); // (an empty layout: the chunks are drawn in)
+		EditorLevel_Clear(&editor_session.level);
+	}
+	Editor_SetTarget(zone, act, code.toLatin1().constData());
+	Editor_SetCursor(0x80, 0x100);
+	Editor_RedrawLevel();
+	Editor_Apply();
+	TerrainEditor::StartedNewLevel();
+	RebuildTables();
+	SetMessage(QString("Keymaker: a new level for zone $%1, act %2, code %3. Save writes it under that name.").arg(zone, 2, 16, QChar('0')).arg(act + 1).arg(code).toUpper());
+	km.info->setText("Editing the new level. The Tiles, Blocks and Chunks tabs change its terrain; Objects and rings places what is in it.");
+}
+
+void KeymakerCopyCode() {
+	const QString code = KeymakerCode();
+	if (code.isEmpty() || code[0].isDigit()) {
+		km.info->setText("Give the zone a code first.");
+		return;
+	}
+	const auto folder = [](int kind) { const char *f = Peek_TerrainFolder(kind); return QString(f ? f : "Res"); };
+	const int zone = km.zone->value();
+	QString text;
+	text += QString("// %1: a zone made in the level editor's Keymaker mode. Save in the editor first, copy its files into res/ (%2/%1, %3/%1, %4/%1, the palette and the layout), and add them to the project's resources.\n").arg(code, folder(0), folder(1), folder(2));
+	text += QString("ZoneId_%1 = 0x%2, // (in the zone list; the tables sized by the zone count grow with it)\n\n").arg(code).arg(QString::number(zone, 16).toUpper());
+	text += "// the level load block table (the zone's row, an entry for each of its acts):\n";
+	text += QString("[ZoneId_%1] = LLB_ACTS(LLB(0, %2_%1, 0, %3_%1, PalId_%1, %4_%1)),\n").arg(code, folder(0), folder(1), folder(2));
+	QGuiApplication::clipboard()->setText(text);
+	km.info->setText("The C code is on the clipboard.");
+}
+} // namespace
+
+void KeymakerForTest(QMainWindow *window, int zone, int act, const QString &code) { // (the automated check's: the dialog's Start button, with these)
+	ShowKeymaker(window);
+	km.zone->setValue(zone);
+	km.act->setCurrentIndex(act);
+	km.code->setText(code);
+	KeymakerStart();
+}
+
+void ShowKeymaker(QMainWindow *window) {
+	if (keymaker == nullptr) {
+		keymaker = new QDialog(window);
+		keymaker->setWindowTitle("Keymaker");
+		auto *layout = new QVBoxLayout(keymaker);
+		auto *note = new QLabel("Keymaker mode (named for the Matrix Reloaded character who makes a key to any door): pick any zone number that has no level (an empty slot, or one past the end of the game's zone array) and jump straight into editing a new level for it. The game cannot run a zone it does not have, so the level is made in the one that is running; the zone number and the code only name what is saved and copied.", keymaker);
+		note->setWordWrap(true);
+		layout->addWidget(note);
+		auto *row = new QHBoxLayout();
+		km.zone = new QSpinBox(keymaker);
+		km.zone->setRange(0, 255);
+		km.zone->setDisplayIntegerBase(16);
+		km.zone->setPrefix("Zone $");
+		EditorPeek peek;
+		Peek_EditorState(&peek);
+		km.zone->setValue(peek.zone_count);
+		km.act = new QComboBox(keymaker);
+		for (int a = 0; a < 4; a++)
+			km.act->addItem(QString("Act %1").arg(a + 1));
+		km.code = new QLineEdit(keymaker);
+		km.code->setPlaceholderText("Code, e.g. WNT");
+		km.code->setMaxLength(8);
+		row->addWidget(km.zone);
+		row->addWidget(km.act);
+		row->addWidget(km.code, 1);
+		layout->addLayout(row);
+		km.start = new QComboBox(keymaker);
+		km.start->addItem("Start from: a blank level with a floor", -1);
+		for (int z = 0; z < peek.zone_count; z++)
+			if (Game_EditorZoneHasTerrain(z, 0)) {
+				const char *name = Peek_ZoneName(z), *code = Peek_ZoneCode(z);
+				km.start->addItem(QString("Start from: %1's terrain").arg(name ? name : (code ? code : "a zone")), z);
+			}
+		layout->addWidget(km.start);
+		km.info = new QLabel(keymaker);
+		km.info->setWordWrap(true);
+		layout->addWidget(km.info);
+		auto *buttons = new QHBoxLayout();
+		auto *start = new QPushButton("Start editing", keymaker);
+		auto *copy = new QPushButton("Copy the C code", keymaker);
+		buttons->addWidget(start);
+		buttons->addWidget(copy);
+		layout->addLayout(buttons);
+		const auto refresh = [] { km.info->setText(ZoneStatus(km.zone->value(), km.act->currentIndex())); };
+		QObject::connect(km.zone, qOverload<int>(&QSpinBox::valueChanged), keymaker, refresh);
+		QObject::connect(km.act, qOverload<int>(&QComboBox::currentIndexChanged), keymaker, refresh);
+		QObject::connect(start, &QPushButton::clicked, keymaker, [] { KeymakerStart(); });
+		QObject::connect(copy, &QPushButton::clicked, keymaker, [] { KeymakerCopyCode(); });
+		refresh();
+	}
+	keymaker->show();
+	keymaker->raise();
+}
+
 void Show(QMainWindow *window) {
 	if (w.dialog == nullptr)
 		Build(window);
@@ -497,6 +667,21 @@ void SelectObjectRow(int row) {
 
 bool SaveNow() {
 	return Save();
+}
+
+void GrabTabs(const QString &prefix) {
+	if (w.dialog == nullptr)
+		return;
+	for (QTabWidget *tabs : w.dialog->findChildren<QTabWidget *>()) {
+		for (int t = 0; t < tabs->count(); t++) {
+			tabs->setCurrentIndex(t);
+			for (int i = 0; i < 5; i++)
+				QApplication::processEvents();
+			w.dialog->grab().save(QString("%1-tab%2.png").arg(prefix).arg(t));
+		}
+		tabs->setCurrentIndex(0);
+		break;
+	}
 }
 
 bool IsOpen() {

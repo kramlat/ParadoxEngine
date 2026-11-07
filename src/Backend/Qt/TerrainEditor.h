@@ -14,6 +14,7 @@ void SelectForTest(int block, int chunk); // selects a block and a chunk (the au
 void Refresh();                 // shows the level's data again (it was loaded, or changed elsewhere)
 bool Dirty();                   // something has been changed and not saved
 void Reset();                   // a level (or none) is being edited anew: nothing is changed
+void StartedNewLevel();         // the level's terrain was replaced by another (Keymaker): the selections and the overlay start over, and it is not saved
 bool Save(const QString &slot_folder, int zone, int act, QString *message); // writes the terrain files of the zone to <slot_folder>/<kind folder>/<zone>, and the layout of the act
 
 } // namespace TerrainEditor

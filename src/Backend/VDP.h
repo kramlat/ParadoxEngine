@@ -81,8 +81,8 @@ void VDP_ClearVRAM(void); // the tile space, to zero
 uint8_t *VDP_TileSpace(void); // the tile space itself (a plane can be pointed into it: Plane_UseTiles)
 
 // One row (y, 0 to 7) of an 8 bits a pixel tile (64 bytes: a byte a pixel, the colour RAM index; 0 transparent; patterns in 64 byte steps) into 8 pixels of `to` (0xRRGGBBAA) and their priority mask `tom`: a pixel
-// is not drawn if the mask already has a bit of `and`, and `or` is put into the mask of every pixel that is not transparent (as the 4bpp tiles' rows do). The planes and sprites do not use it yet.
-void VDP_DrawTileRow8(uint32_t *to, uint8_t *tom, size_t pattern, int y, bool x_flip, bool y_flip, uint8_t and, uint8_t or);
+// is not drawn if the mask already has a bit of `and_mask`, and `or_mask` is put into the mask of every pixel that is not transparent (as the 4bpp tiles' rows do). The planes and sprites do not use it yet.
+void VDP_DrawTileRow8(uint32_t *to, uint8_t *tom, size_t pattern, int y, bool x_flip, bool y_flip, uint8_t and_mask, uint8_t or_mask);
 
 void VDP_SeekCRAM(size_t offset);
 void VDP_WriteCRAM(const uint16_t *data, size_t len); // Mega Drive colour words (0000bbb0ggg0rrr0), upscaled to true colour as they go in
@@ -174,7 +174,32 @@ void VDP_SetShadowHighlight(bool enable);
 //How many rows the picture the VDP draws has: the screen's height, twice that when stacked
 int VDP_OutputRows(void);
 
+//The vertical and horizontal interrupts' handlers (VDP_Init takes them from the game's header; a test without a window sets its own here, NULL for none)
+void VDP_SetInterrupts(MD_Vector v_interrupt, MD_Vector h_interrupt);
+
 //Draws a frame into the VDP's own picture buffer without handing it to the display (for tests); the pixels (RGBA, `pitch` pixels a row) are read back with
 //VDP_GetFrame
 void VDP_DrawFrame(void);
 const uint32_t *VDP_GetFrame(int *pitch, int *rows);
+
+//Drawing on the GPU. The frame's lines are gone through as ever (the vertical interrupt first, the horizontal ones where they fall, which run the game's code), but in place of their pixels what each line
+//reads is written down: its palette, scroll, window, backdrop and sprites, and the tiles, planes and sprite tables (again only when an interrupt changed them). A compute shader (the Qt backend's
+//shaders/vdp.comp) makes the pixels from that by the same rules as the CPU, pixel for pixel. The layout of `words` is VDP.c's (VDP_GPU_*), and the shader's.
+//The GPU draws what the Genesis' reading of tiles draws; a frame with any of the real readings on (VDP_SetReal), the palette peek shown, or plane sizes that are not powers of two is drawn by the CPU.
+typedef struct {
+	const uint32_t *words; // everything the shader reads
+	size_t count;          // how many
+	int width, rows;       // the picture
+} VDP_GpuFrame;
+
+//The backend says whether it draws frames on the GPU (Render_ScreenGpu then gets them). On by default where the backend can; PARADOX_DRAWING=cpu turns it off.
+void VDP_UseGpu(bool use);
+bool VDP_UsingGpu(void);
+
+//Goes through a frame as VDP_DrawFrame does (the interrupts included), writing down the GPU's frame; with `also_cpu` the CPU draws the same lines too, into the picture VDP_GetFrame reads, so that the
+//two can be compared (the tests). False when the frame is not one the GPU draws (see above): then it was drawn by the CPU, whatever `also_cpu` says.
+bool VDP_CaptureFrame(VDP_GpuFrame *frame, bool also_cpu);
+
+//The tests' check of the GPU's picture (the Qt backend): how many pixels of the GPU's picture of `frame` differ from the CPU's (`cpu`, `pitch` pixels a row; afterglow off); -1 when there is no
+//GPU to ask (no device, or one without compute shaders)
+int VDP_GpuCompareFrame(const VDP_GpuFrame *frame, const uint32_t *cpu, int pitch);

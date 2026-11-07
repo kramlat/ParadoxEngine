@@ -117,6 +117,7 @@ int Render_Init(const MD_Header* header) {
         return -1;
 
     vsync = 0;
+    VDP_UseGpu(QtHost_GpuFrames()); // (the frames are drawn on the GPU where the window can)
     perf_freq = SDL_GetPerformanceFrequency();
     next_frame_time = SDL_GetPerformanceCounter();
     return 0;
@@ -142,6 +143,7 @@ static int countdown_pie_seconds = 0;
 
 void Render_SetCountdownPie(bool active, float fraction, int seconds_left) {
     countdown_pie_active = active;
+    VDP_UseGpu(!active && QtHost_GpuFrames()); // (the pie is drawn over the CPU's frame)
     countdown_pie_fraction = fraction;
     countdown_pie_seconds = seconds_left;
 }
@@ -262,8 +264,10 @@ void Render_SetZ80Peek(bool active, const Z80PeekData *data) {
 // each frame sans DrawCountdownPie/DrawZ80Peek, all of which
 // draw AFTER this buffer is populated) as an uncompressed PPM -- no
 // external image library needed for a debug-only dump.
+static bool last_frame_gpu; // (the last frame was drawn on the GPU: its picture is the window's, not the history buffer's)
+
 #ifdef CRT_MOTION_BLUR
-bool Render_SaveScreenshot(const char *path) {
+static bool Render_SaveCpuScreenshot(const char *path) {
     FILE *f = fopen(path, "wb");
     if (!f)
         return false;
@@ -279,11 +283,27 @@ bool Render_SaveScreenshot(const char *path) {
     return true;
 }
 #else
-bool Render_SaveScreenshot(const char *path) {
+static bool Render_SaveCpuScreenshot(const char *path) {
     (void)path;
     return false; // no frame history buffer without CRT_MOTION_BLUR
 }
 #endif
+
+bool Render_SaveScreenshot(const char *path) {
+    if (!last_frame_gpu)
+        return Render_SaveCpuScreenshot(path);
+    const int w = SCREEN_WIDTH, rows = VDP_OutputRows();
+    uint8_t *rgb = (uint8_t *)malloc((size_t)w * (size_t)rows * 3);
+    FILE *f = NULL;
+    const bool ok = rgb != NULL && QtHost_GpuPicture(rgb, w, rows) && (f = fopen(path, "wb")) != NULL;
+    if (ok) {
+        fprintf(f, "P6\n%d %d\n255\n", w, rows);
+        fwrite(rgb, 3, (size_t)w * (size_t)rows, f);
+        fclose(f);
+    }
+    free(rgb);
+    return ok;
+}
 
 static void DrawCountdownPie(void) {
     if (!countdown_pie_active)
@@ -372,8 +392,11 @@ void Render_Quit(void) {
     QtHost_Quit();
 }
 
+static void Render_Pace(void);
+
 // This takes in the internal VDP screen buffer positioned after the padding
 void Render_Screen(const uint32_t* screen) {
+    last_frame_gpu = false;
     // Lock screen texture
     uint8_t* to;
     int pitch;
@@ -422,6 +445,21 @@ void Render_Screen(const uint32_t* screen) {
     DrawCountdownPie();
     QtHost_Present(target->pixels, target->pitch);
 
+    Render_Pace();
+}
+
+// A frame the GPU draws (VDP_CaptureFrame): its words go to the window, whose compute shader makes the picture (and the afterglow) there
+void Render_ScreenGpu(const VDP_GpuFrame *frame) {
+    last_frame_gpu = true;
+    if (!QtHost_PresentGpu(frame->words, frame->count, frame->width, frame->rows))
+        VDP_UseGpu(false); // (the device cannot after all: the CPU draws from the next frame on)
+#ifdef CRT_MOTION_BLUR
+    prev_frame_valid = 0; // (the afterglow went on on the GPU: the CPU's starts again if it takes over)
+#endif
+    Render_Pace();
+}
+
+static void Render_Pace(void) {
     // Pace ourselves against our own monotonic clock: the Qt widget presents without
     // waiting for the display's refresh, so this is what holds the game at 60 FPS.
     next_frame_time += perf_freq / 60;

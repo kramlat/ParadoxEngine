@@ -13,6 +13,7 @@
 int Render_Init(const MD_Header *header);
 void Render_Quit(void);
 void Render_Screen(const uint32_t *screen);
+void Render_ScreenGpu(const VDP_GpuFrame *frame); // (a frame the GPU draws: VDP_CaptureFrame)
 void Render_SetPictureSize(bool resize_window);
 
 //Input backend interface
@@ -213,6 +214,11 @@ void VDP_SetBackgroundColour(uint8_t index) {
 	}
 	#endif
 	vdp_background_colour = index;
+}
+
+void VDP_SetInterrupts(MD_Vector v_interrupt, MD_Vector h_interrupt) {
+	vdp_vint = v_interrupt;
+	vdp_hint = h_interrupt;
 }
 
 int VDP_OutputRows(void) {
@@ -860,18 +866,180 @@ static void VDP_BuildSpriteCache(struct VDP_SpriteCache *cache, int rows, const 
 	}
 }
 
+// ---- the GPU's frame (VDP_CaptureFrame) ----
+// The words the compute shader reads (shaders/vdp.comp has the same layout): a header, a record for each line of each view, and what the records point at (by word offset): the tile space as it
+// was, each view's planes (a word an entry: the pattern in the low half, the attribute word in the high), its sprite table (three words a sprite: y | size_link << 16, pattern | x << 16, attr), the
+// lists of the sprites each line shows (an index into the table a word, in drawing order) and the palettes (256 colours, 0xRRGGBBAA). A snapshot is taken at the start of the frame and again after a
+// horizontal interrupt, but kept only when it differs from the one before, so a frame whose interrupts change only the palette has one tile space.
+enum { VDP_GPU_WIDTH, VDP_GPU_ROWS, VDP_GPU_MODE, VDP_GPU_H, VDP_GPU_MAIN_TILES, VDP_GPU_LINES, VDP_GPU_PW0, VDP_GPU_PH0, VDP_GPU_PW1, VDP_GPU_PH1, VDP_GPU_W1, VDP_GPU_HEADER = 16 };
+enum { VDP_GPUL_PALETTE, VDP_GPUL_HSCROLL, VDP_GPUL_VSRAM, VDP_GPUL_WINDOW, VDP_GPUL_FLAGS, VDP_GPUL_VRAM, VDP_GPUL_PLANE_A, VDP_GPUL_PLANE_B, VDP_GPUL_WINDOW_PLANE, VDP_GPUL_SPRITES,
+       VDP_GPUL_LIST, VDP_GPUL_COUNT, VDP_GPU_LINE };
+
+static bool vdp_use_gpu;
+static uint32_t *vdp_gpu_words;
+static size_t vdp_gpu_count, vdp_gpu_capacity;
+static size_t vdp_gpu_lines; // where the line records start
+typedef struct { uint32_t at, length; } VDP_GpuBlock;
+static struct {
+	VDP_GpuBlock vram, planes[2][3], sprites[2], palettes[4]; // the palettes: the colour RAM's, the second view's, the split screen's dry and wet water
+} vdp_gpu_now;
+static size_t vdp_gpu_sprite_entries[2]; // how much of each view's sprite table the lines use
+
+void VDP_UseGpu(bool use) {
+	vdp_use_gpu = use;
+}
+
+bool VDP_UsingGpu(void) {
+	return vdp_use_gpu;
+}
+
+static size_t VDP_GpuReserve(size_t words) {
+	if (vdp_gpu_count + words > vdp_gpu_capacity) {
+		size_t capacity = vdp_gpu_capacity ? vdp_gpu_capacity : 0x10000;
+		while (capacity < vdp_gpu_count + words)
+			capacity *= 2;
+		uint32_t *grown = realloc(vdp_gpu_words, capacity * sizeof(uint32_t));
+		if (grown == NULL) {
+			puts("VDP_GpuReserve: out of memory");
+			exit(1);
+		}
+		vdp_gpu_words = grown;
+		vdp_gpu_capacity = capacity;
+	}
+	const size_t at = vdp_gpu_count;
+	vdp_gpu_count += words;
+	return at;
+}
+
+// A block just written at `at` (to the end of the words) is kept, or given back when it is the same as `*now`, which then stays
+static void VDP_GpuKeep(VDP_GpuBlock *now, size_t at) {
+	const uint32_t length = (uint32_t)(vdp_gpu_count - at);
+	if (now->at != 0 && now->length == length && memcmp(vdp_gpu_words + now->at, vdp_gpu_words + at, length * sizeof(uint32_t)) == 0) {
+		vdp_gpu_count = at;
+		return;
+	}
+	now->at = (uint32_t)at;
+	now->length = length;
+}
+
+static void VDP_GpuSnapPlane(VDP_GpuBlock *now, const plane_t *plane, size_t entries) {
+	if (plane->entries == NULL) {
+		*now = (VDP_GpuBlock){ 0, 0 };
+		return;
+	}
+	const size_t at = VDP_GpuReserve(entries);
+	uint32_t *to = vdp_gpu_words + at;
+	for (size_t i = 0; i < entries; i++)
+		to[i] = i < plane->count ? (uint32_t)plane->entries[i].pattern | ((uint32_t)plane->entries[i].attr << 16) : 0;
+	VDP_GpuKeep(now, at);
+}
+
+static void VDP_GpuSnapPalette(VDP_GpuBlock *now, uint32_t (*palette)[16]) {
+	const size_t at = VDP_GpuReserve(ACTIVE_COLOURS);
+	memcpy(vdp_gpu_words + at, &palette[0][0], ACTIVE_COLOURS * sizeof(uint32_t));
+	VDP_GpuKeep(now, at);
+}
+
+// What the lines read from now on: the tile space, the views' planes and sprite tables and the palettes as they are
+static void VDP_GpuSnap(int views) {
+	size_t at = VDP_GpuReserve(VRAM_SIZE / 4);
+	memcpy(vdp_gpu_words + at, vdp_vram, VRAM_SIZE);
+	VDP_GpuKeep(&vdp_gpu_now.vram, at);
+	for (int v = 0; v < views; v++) {
+		const viewport_t *vp = v ? &screen2p : &screen1p;
+		const size_t entries = (size_t)vp->plane_width * vp->plane_height;
+		VDP_GpuSnapPlane(&vdp_gpu_now.planes[v][0], &vp->plane_a, entries);
+		VDP_GpuSnapPlane(&vdp_gpu_now.planes[v][1], &vp->plane_b, entries);
+		VDP_GpuSnapPlane(&vdp_gpu_now.planes[v][2], &vp->window, entries);
+		if (vp->sprites != NULL && vdp_gpu_sprite_entries[v] != 0) {
+			at = VDP_GpuReserve(vdp_gpu_sprite_entries[v] * 3);
+			for (size_t i = 0; i < vdp_gpu_sprite_entries[v]; i++) {
+				const sprite_t *s = &vp->sprites[i];
+				vdp_gpu_words[at + i * 3 + 0] = (uint32_t)s->y | ((uint32_t)s->size_link << 16);
+				vdp_gpu_words[at + i * 3 + 1] = (uint32_t)s->pattern | ((uint32_t)s->x << 16);
+				vdp_gpu_words[at + i * 3 + 2] = s->attr;
+			}
+			VDP_GpuKeep(&vdp_gpu_now.sprites[v], at);
+		}
+	}
+	VDP_GpuSnapPalette(&vdp_gpu_now.palettes[0], vdp_screen_pal);
+	if (views > 1) {
+		VDP_GpuSnapPalette(&vdp_gpu_now.palettes[1], screen2p.palette != NULL ? vdp_screen_pal2 : vdp_screen_pal);
+		if (vdp_water_dry != NULL) {
+			VDP_GpuSnapPalette(&vdp_gpu_now.palettes[2], vdp_water_pal[0]);
+			VDP_GpuSnapPalette(&vdp_gpu_now.palettes[3], vdp_water_pal[1]);
+		}
+	}
+}
+
+// Writes down what line `line` of view `view` reads, with the palette `palette` (one of vdp_gpu_now.palettes), `view_w` pixels wide
+static void VDP_GpuLine(int view, size_t line, int view_w, const viewport_t *vp, int palette, const int16_t *hscroll) {
+	uint32_t *r = vdp_gpu_words + vdp_gpu_lines + ((size_t)view * (size_t)SCREEN_HEIGHT + line) * VDP_GPU_LINE;
+	int wx0 = 0, wx1 = 0;
+	const bool window = vp->window.entries != NULL && VDP_WindowSpan(vp, line, view_w, &wx0, &wx1);
+	r[VDP_GPUL_PALETTE] = vdp_gpu_now.palettes[palette].at;
+	r[VDP_GPUL_HSCROLL] = (uint32_t)(uint16_t)hscroll[0] | ((uint32_t)(uint16_t)hscroll[1] << 16);
+	r[VDP_GPUL_VSRAM] = (uint32_t)(uint16_t)vp->vsram.a | ((uint32_t)(uint16_t)vp->vsram.b << 16);
+	r[VDP_GPUL_WINDOW] = window ? ((uint32_t)wx0 | ((uint32_t)wx1 << 16)) : 0;
+	r[VDP_GPUL_FLAGS] = vdp_background_colour | (vdp_sh_enabled ? 0x100u : 0) | (window ? 0x200u : 0);
+	r[VDP_GPUL_VRAM] = vdp_gpu_now.vram.at;
+	r[VDP_GPUL_PLANE_A] = vdp_gpu_now.planes[view][0].at;
+	r[VDP_GPUL_PLANE_B] = vdp_gpu_now.planes[view][1].at;
+	r[VDP_GPUL_WINDOW_PLANE] = vdp_gpu_now.planes[view][2].at;
+	r[VDP_GPUL_SPRITES] = vdp_gpu_now.sprites[view].at;
+	hbla_pos = (int16_t)line; // (as VDP_DrawViewRow leaves it, for the interrupt)
+}
+
+static bool VDP_PowerOfTwo(unsigned n) {
+	return n != 0 && (n & (n - 1)) == 0;
+}
+
+// Whether the GPU draws the frame as it is now (VDP.h says what it does not draw)
+static bool VDP_GpuDrawable(int views) {
+	if (vdp_hooks.real != 0 || VDP_PALETTE_DISPLAY)
+		return false;
+	for (int v = 0; v < views; v++) {
+		const viewport_t *vp = v ? &screen2p : &screen1p;
+		if (!VDP_PowerOfTwo(vp->plane_width) || !VDP_PowerOfTwo(vp->plane_height) || vp->plane_width > 0x2000 || vp->plane_height > 0x2000 || vp->hscroll == NULL)
+			return false; // (the CPU's wrap of a negative scroll is the mask's only for a power of two; and a plane of 8192 tiles' pixels still fits 16 bits)
+	}
+	return true;
+}
+
+static void VDP_DrawLines(bool draw_cpu, bool capture);
+
 // Draws the whole frame into the VDP's own picture buffer (and runs the vertical and horizontal interrupts as it goes)
 void VDP_DrawFrame(void) {
-	//Get VDP screen pointer
-	vdp_screen = &vdp_screen_internal[VDP_INTERNAL_PAD];
-	vdp_mask = &vdp_mask_internal[VDP_INTERNAL_PAD];
-
 	//Send vertical interrupt. On a real VDP the vertical blank comes first: its handler copies the camera, the scroll tables, the
 	//palette and the sprite table for the frame that is drawn after it, all together. Running it after the frame was drawn (as this
 	//once did) showed the planes scrolled to the previous camera while the sprites, which are read live, had the new one: objects
 	//drifted against the background whenever the screen scrolled.
 	if (vdp_vint != NULL)
 		vdp_vint();
+	VDP_DrawLines(true, false);
+}
+
+bool VDP_CaptureFrame(VDP_GpuFrame *frame, bool also_cpu) {
+	if (vdp_vint != NULL)
+		vdp_vint();
+	const int views = vdp_split_mode == VDP_SPLIT_NONE ? 1 : 2;
+	if (!VDP_GpuDrawable(views)) {
+		VDP_DrawLines(true, false);
+		return false;
+	}
+	VDP_DrawLines(also_cpu, true);
+	frame->words = vdp_gpu_words;
+	frame->count = vdp_gpu_count;
+	frame->width = SCREEN_WIDTH;
+	frame->rows = VDP_OutputRows();
+	return true;
+}
+
+// The lines of the frame, after the vertical interrupt: drawn by the CPU, written down for the GPU, or both
+static void VDP_DrawLines(bool draw_cpu, bool capture) {
+	//Get VDP screen pointer
+	vdp_screen = &vdp_screen_internal[VDP_INTERNAL_PAD];
+	vdp_mask = &vdp_mask_internal[VDP_INTERNAL_PAD];
 
 	//Calculate sprite cache
 	memset(vdp_sprite_cache, 0, sizeof(vdp_sprite_cache));
@@ -892,6 +1060,47 @@ void VDP_DrawFrame(void) {
 	//Render VDP screen
 	VDP_RefreshPalette();
 
+	const int views = (stacked || side) ? 2 : 1;
+	if (capture) {
+		// The header, the lines' records (filled in as the lines are gone through) and the sprite lists, which the frame's start settles (the sprites themselves are read as each line is drawn)
+		vdp_gpu_count = 0;
+		memset(&vdp_gpu_now, 0, sizeof(vdp_gpu_now));
+		const size_t header = VDP_GpuReserve(VDP_GPU_HEADER);
+		vdp_gpu_lines = VDP_GpuReserve((size_t)views * (size_t)H * VDP_GPU_LINE);
+		memset(vdp_gpu_words + header, 0, (vdp_gpu_count - header) * sizeof(uint32_t));
+		uint32_t *head = vdp_gpu_words + header;
+		head[VDP_GPU_WIDTH] = (uint32_t)SCREEN_WIDTH;
+		head[VDP_GPU_ROWS] = (uint32_t)VDP_OutputRows();
+		head[VDP_GPU_MODE] = stacked ? 1 : side ? 2 : 0;
+		head[VDP_GPU_H] = (uint32_t)H;
+		head[VDP_GPU_MAIN_TILES] = (uint32_t)TileBank_Main()->tiles;
+		head[VDP_GPU_LINES] = (uint32_t)vdp_gpu_lines;
+		head[VDP_GPU_PW0] = screen1p.plane_width;
+		head[VDP_GPU_PH0] = screen1p.plane_height;
+		head[VDP_GPU_PW1] = screen2p.plane_width;
+		head[VDP_GPU_PH1] = screen2p.plane_height;
+		head[VDP_GPU_W1] = (uint32_t)(SCREEN_WIDTH / 2);
+		for (int v = 0; v < views; v++) {
+			const sprite_t *table = v ? screen2p.sprites : screen1p.sprites;
+			size_t used = 0;
+			for (int line = 0; line < H; line++) {
+				const struct VDP_SpriteCache *scache = &vdp_sprite_cache[(size_t)v * (size_t)H + (size_t)line];
+				const size_t list = VDP_GpuReserve(scache->pushind);
+				for (uint8_t i = 0; i < scache->pushind; i++) {
+					const size_t index = (size_t)(scache->sprite[i] - table);
+					vdp_gpu_words[list + i] = (uint32_t)index;
+					if (index + 1 > used)
+						used = index + 1;
+				}
+				uint32_t *r = vdp_gpu_words + vdp_gpu_lines + ((size_t)v * (size_t)H + (size_t)line) * VDP_GPU_LINE;
+				r[VDP_GPUL_LIST] = (uint32_t)list;
+				r[VDP_GPUL_COUNT] = scache->pushind;
+			}
+			vdp_gpu_sprite_entries[v] = used;
+		}
+		VDP_GpuSnap(views);
+	}
+
 	uint32_t *to = vdp_screen;
 	uint8_t *tom = vdp_mask;
 	const int16_t *hscroll = screen1p.hscroll;
@@ -905,7 +1114,10 @@ void VDP_DrawFrame(void) {
 	int32_t countdown = screen1p.hint_counter;
 	for (size_t y = 0; y < rows; y++, to += SCREEN_PITCH, tom += SCREEN_PITCH) {
 		if (!stacked && !side) {
-			VDP_DrawScanline(y, to, tom, &vdp_sprite_cache[y], hscroll + 2 * y);
+			if (capture)
+				VDP_GpuLine(0, y, SCREEN_WIDTH, &screen1p, 0, hscroll + 2 * y);
+			if (draw_cpu)
+				VDP_DrawScanline(y, to, tom, &vdp_sprite_cache[y], hscroll + 2 * y);
 		} else if (stacked) {
 			//Two ordinary views (each a whole picture, with its own planes, scroll, sprites and palette), the first squashed into the top half of the picture and the second into the bottom half:
 			//each output row is the average of the rows of the view it covers
@@ -927,7 +1139,12 @@ void VDP_DrawFrame(void) {
 			memset(sum_g, 0, sizeof(uint32_t) * SCREEN_WIDTH);
 			memset(sum_b, 0, sizeof(uint32_t) * SCREEN_WIDTH);
 			for (size_t src = first_row; src < end_row; src++) {
-				vdp_draw_pal = water_split ? vdp_water_pal[(int16_t)src > vdp_water_line[second ? 1 : 0]] : view_pal;
+				const bool wet = water_split && (int16_t)src > vdp_water_line[second ? 1 : 0];
+				if (capture)
+					VDP_GpuLine(second ? 1 : 0, src, SCREEN_WIDTH, vp, water_split ? (wet ? 3 : 2) : (second ? 1 : 0), hs + 2 * src);
+				if (!draw_cpu)
+					continue;
+				vdp_draw_pal = water_split ? vdp_water_pal[wet] : view_pal;
 				VDP_DrawViewRow(src, src_pixels + VDP_INTERNAL_PAD, src_mask + VDP_INTERNAL_PAD, SCREEN_WIDTH, 128, false, vp, &vdp_sprite_cache[(second ? (size_t)H : 0) + src], hs + 2 * src);
 				for (int x = 0; x < SCREEN_WIDTH; x++) {
 					uint32_t c = src_pixels[VDP_INTERNAL_PAD + x];
@@ -938,21 +1155,28 @@ void VDP_DrawFrame(void) {
 			}
 			vdp_draw_pal = vdp_screen_pal;
 			const uint32_t n = (uint32_t)(end_row - first_row);
-			for (int x = 0; x < SCREEN_WIDTH; x++)
-				to[x] = ((sum_r[x] / n) << 24) | ((sum_g[x] / n) << 16) | ((sum_b[x] / n) << 8) | 0xFF;
+			if (draw_cpu)
+				for (int x = 0; x < SCREEN_WIDTH; x++)
+					to[x] = ((sum_r[x] / n) << 24) | ((sum_g[x] / n) << 16) | ((sum_b[x] / n) << 8) | 0xFF;
 		} else {
 			//Two views side by side: each is drawn on its own row buffer, then the halves go into the picture
 			static uint32_t half_pixels[SCREEN_MAX_PITCH];
 			static uint8_t half_mask[SCREEN_MAX_PITCH];
 			const int w1 = SCREEN_WIDTH / 2, w2 = SCREEN_WIDTH - w1;
-			vdp_draw_pal = water_split ? vdp_water_pal[(int16_t)y > vdp_water_line[0]] : vdp_screen_pal;
-			VDP_DrawViewRow(y, half_pixels + VDP_INTERNAL_PAD, half_mask + VDP_INTERNAL_PAD, w1, 128, false, &screen1p, &vdp_sprite_cache[y], hscroll + 2 * y);
-			memcpy(to, half_pixels + VDP_INTERNAL_PAD, (size_t)w1 * sizeof(uint32_t));
-			vdp_draw_pal = water_split ? vdp_water_pal[(int16_t)y > vdp_water_line[1]] : (screen2p.palette != NULL ? vdp_screen_pal2 : vdp_screen_pal);
 			const int16_t *hs2 = screen2p.hscroll + 2 * y;
-			VDP_DrawViewRow(y, half_pixels + VDP_INTERNAL_PAD, half_mask + VDP_INTERNAL_PAD, w2, 128, false, &screen2p, &vdp_sprite_cache[(size_t)H + y], hs2);
-			vdp_draw_pal = vdp_screen_pal;
-			memcpy(to + w1, half_pixels + VDP_INTERNAL_PAD, (size_t)w2 * sizeof(uint32_t));
+			if (capture) {
+				VDP_GpuLine(0, y, w1, &screen1p, water_split ? ((int16_t)y > vdp_water_line[0] ? 3 : 2) : 0, hscroll + 2 * y);
+				VDP_GpuLine(1, y, w2, &screen2p, water_split ? ((int16_t)y > vdp_water_line[1] ? 3 : 2) : 1, hs2);
+			}
+			if (draw_cpu) {
+				vdp_draw_pal = water_split ? vdp_water_pal[(int16_t)y > vdp_water_line[0]] : vdp_screen_pal;
+				VDP_DrawViewRow(y, half_pixels + VDP_INTERNAL_PAD, half_mask + VDP_INTERNAL_PAD, w1, 128, false, &screen1p, &vdp_sprite_cache[y], hscroll + 2 * y);
+				memcpy(to, half_pixels + VDP_INTERNAL_PAD, (size_t)w1 * sizeof(uint32_t));
+				vdp_draw_pal = water_split ? vdp_water_pal[(int16_t)y > vdp_water_line[1]] : (screen2p.palette != NULL ? vdp_screen_pal2 : vdp_screen_pal);
+				VDP_DrawViewRow(y, half_pixels + VDP_INTERNAL_PAD, half_mask + VDP_INTERNAL_PAD, w2, 128, false, &screen2p, &vdp_sprite_cache[(size_t)H + y], hs2);
+				vdp_draw_pal = vdp_screen_pal;
+				memcpy(to + w1, half_pixels + VDP_INTERNAL_PAD, (size_t)w2 * sizeof(uint32_t));
+			}
 		}
 
 		if (screen1p.hint_enable && !water_split && countdown-- <= 0) {
@@ -961,9 +1185,11 @@ void VDP_DrawFrame(void) {
 			//Send horizontal interrupt
 			vdp_hint();
 			VDP_RefreshPalette();
+			if (capture)
+				VDP_GpuSnap(views); // (what it changed: the lines after it read that)
 		}
 	}
-	
+
 }
 
 const uint32_t *VDP_GetFrame(int *pitch, int *rows) {
@@ -975,14 +1201,24 @@ const uint32_t *VDP_GetFrame(int *pitch, int *rows) {
 }
 
 void VDP_Render(void) {
-	VDP_DrawFrame();
+	//Draw the frame: on the GPU where the backend can (the CPU still goes through its lines and their interrupts), else on the CPU; a frame the GPU cannot draw, the CPU draws
+	static int hashing = -1; // (the TEMP-HASH dump below reads the CPU's picture)
+	if (hashing < 0)
+		hashing = getenv("SONIC_HASH") != NULL;
+	static VDP_GpuFrame gpu_frame;
+	if (vdp_use_gpu && !hashing && VDP_CaptureFrame(&gpu_frame, false)) {
+		Render_ScreenGpu(&gpu_frame);
+	} else {
+		if (!vdp_use_gpu || hashing)
+			VDP_DrawFrame();
 
-	//Render screen
-	{ // TEMP-HASH
-		extern int vdp_hash_hook(const uint32_t *screen);
-		vdp_hash_hook(vdp_screen);
+		//Render screen
+		{ // TEMP-HASH
+			extern int vdp_hash_hook(const uint32_t *screen);
+			vdp_hash_hook(vdp_screen);
+		}
+		Render_Screen(vdp_screen);
 	}
-	Render_Screen(vdp_screen);
 
 	//Generate and queue this frame's audio
 	Audio_Update();

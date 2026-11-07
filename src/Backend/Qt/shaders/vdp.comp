@@ -1,0 +1,173 @@
+#version 450
+// The VDP's picture on the GPU: a pixel an invocation, made from what VDP_CaptureFrame wrote down (Backend/VDP.c, VDP_GPU_*: the layout is the same here) by the rules of the CPU's VDP_DrawViewRow,
+// pixel for pixel: the backdrop, plane B, plane A or the window, the line's sprites in their order, each through the priority mask (VDP_MASK_*), then shadow/highlight. The split screens: side by
+// side (two views, each half the width) or stacked (each output row the average of the rows of the view it covers). Then the CRT's afterglow, as the CPU's Render.c blends it.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(std430, binding = 0) readonly buffer Words { uint w[]; };
+layout(rgba8, binding = 1) uniform image2D picture;
+layout(std140, binding = 2) uniform Afterglow {
+    int blend;  // 1: blend with what the picture held (the last frame)
+    int alpha;  // the new frame's weight, out of 255
+    int pad0, pad1;
+};
+
+const uint MASK_PLANEPRI = 1u, MASK_SPRITE = 2u, MASK_SH_SHADOW = 4u, MASK_SH_HIGHLIGHT = 8u;
+// the header's words
+const uint H_WIDTH = 0u, H_ROWS = 1u, H_MODE = 2u, H_H = 3u, H_MAIN_TILES = 4u, H_LINES = 5u, H_PW0 = 6u, H_PH0 = 7u, H_PW1 = 8u, H_PH1 = 9u, H_W1 = 10u;
+// a line's record
+const uint L_PALETTE = 0u, L_HSCROLL = 1u, L_VSRAM = 2u, L_WINDOW = 3u, L_FLAGS = 4u, L_VRAM = 5u, L_PLANE_A = 6u, L_PLANE_B = 7u, L_WINDOW_PLANE = 8u, L_SPRITES = 9u, L_LIST = 10u, L_COUNT = 11u,
+           LINE = 12u;
+
+int s16(uint v) { return int(v << 16) >> 16; }
+
+// Pixel (col, row) of a 4 bits a pixel pattern: its colour (0 clear)
+uint PatternPixel(uint vram, uint pattern, uint col, uint row) {
+    uint at = pattern * 32u + row * 4u + (col >> 1);
+    uint b = (w[vram + (at >> 2)] >> ((at & 3u) * 8u)) & 0xFFu;
+    return (col & 1u) != 0u ? (b & 0xFu) : (b >> 4);
+}
+
+// A plane's pixel at (x, y) in its pixels (wrapped round its size, a power of two): its colour, and its entry's attribute word
+uint PlanePixel(uint plane, uint pw, uint ph, uint vram, uint x, uint y, out uint attr) {
+    uint entry = w[plane + ((y >> 3) & (ph - 1u)) * pw + ((x >> 3) & (pw - 1u))];
+    attr = entry >> 16;
+    uint row = y & 7u;
+    if ((attr & 4u) != 0u)
+        row ^= 7u;
+    uint col = x & 7u;
+    if ((attr & 2u) != 0u)
+        col ^= 7u;
+    return PatternPixel(vram, entry & 0x7FFu, col, row);
+}
+
+// Pixel `c` of line `line` of view `view`, `view_w` wide: 0xRRGGBBAA
+uint ViewPixel(uint view, uint line, int c, int view_w) {
+    uint r = w[H_LINES] + (view * w[H_H] + line) * LINE;
+    uint pal = w[r + L_PALETTE], flags = w[r + L_FLAGS], vram = w[r + L_VRAM];
+    uint pw = w[view == 0u ? H_PW0 : H_PW1], ph = w[view == 0u ? H_PH0 : H_PH1];
+    uint hs = w[r + L_HSCROLL], vs = w[r + L_VSRAM];
+    uint colour = w[pal + (flags & 0xFFu)];
+    uint mask = 0u;
+    uint attr, v;
+
+    // plane B
+    v = PlanePixel(w[r + L_PLANE_B], pw, ph, vram, uint(c - s16(hs >> 16)), uint(int(line) + s16(vs >> 16)), attr);
+    if (v != 0u) {
+        if ((mask & MASK_PLANEPRI) == 0u)
+            colour = w[pal + ((attr >> 3) & 3u) * 16u + v];
+        mask |= attr & 1u;
+    }
+    // plane A, or the window where it is
+    uint win = w[r + L_WINDOW];
+    if ((flags & 0x200u) != 0u && c >= int(win & 0xFFFFu) && c < int(win >> 16))
+        v = PlanePixel(w[r + L_WINDOW_PLANE], pw, ph, vram, uint(c), line, attr);
+    else
+        v = PlanePixel(w[r + L_PLANE_A], pw, ph, vram, uint(c - s16(hs)), uint(int(line) + s16(vs)), attr);
+    if (v != 0u) {
+        if ((mask & MASK_PLANEPRI) == 0u)
+            colour = w[pal + ((attr >> 3) & 3u) * 16u + v];
+        mask |= attr & 1u;
+    }
+
+    // the sprites, the first on the line over the rest
+    bool sh = (flags & 0x100u) != 0u;
+    uint sprites = w[r + L_SPRITES], list = w[r + L_LIST], count = w[r + L_COUNT], main_tiles = w[H_MAIN_TILES];
+    for (uint i = 0u; i < count; i++) {
+        uint s = sprites + w[list + i] * 3u;
+        uint ysl = w[s], px = w[s + 1u], sattr = w[s + 2u];
+        uint size_link = ysl >> 16;
+        uint sw = (size_link >> 10) & 3u, sh_cells = (size_link >> 8) & 3u;
+        int width_pixels = int(sw + 1u) * 8;
+        int left = s16(uint(int(px >> 16) - 128));
+        if (left <= -width_pixels || left >= view_w || c < left || c >= left + width_pixels)
+            continue;
+        int yy = s16(uint(int(line) - (int(ysl & 0xFFFFu) - 128)));
+        uint ty = uint(yy) >> 3, row = uint(yy) & 7u;
+        if ((sattr & 4u) != 0u) {
+            ty = sh_cells - ty;
+            row ^= 7u;
+        }
+        uint along = uint(c - left);
+        uint col = along >> 3;
+        if ((sattr & 2u) != 0u)
+            col = sw - col;
+        uint cell = (px & 0x7FFu) + ty + col * (sh_cells + 1u);
+        if (cell + 1u > main_tiles)
+            continue; // (past the bank: a blank tile)
+        uint pcol = along & 7u;
+        if ((sattr & 2u) != 0u)
+            pcol = 7u - pcol;
+        v = PatternPixel(vram, cell, pcol, row);
+        if (v == 0u)
+            continue;
+        uint line_pal = (sattr >> 3) & 3u;
+        uint and_mask = (sattr & 1u) != 0u ? MASK_SPRITE : (MASK_PLANEPRI | MASK_SPRITE);
+        if (sh && line_pal == 3u && v >= 14u) {
+            mask |= v == 14u ? MASK_SH_HIGHLIGHT : MASK_SH_SHADOW;
+        } else {
+            if ((mask & and_mask) == 0u)
+                colour = w[pal + line_pal * 16u + v];
+            mask |= MASK_SPRITE;
+        }
+    }
+
+    // shadow/highlight
+    if (sh) {
+        int state = (mask & (MASK_PLANEPRI | MASK_SPRITE)) != 0u ? 1 : 0;
+        if ((mask & MASK_SH_HIGHLIGHT) != 0u)
+            state++;
+        if ((mask & MASK_SH_SHADOW) != 0u)
+            state = 0;
+        if (state != 1) {
+            uint cr = (colour >> 24) & 0xFFu, cg = (colour >> 16) & 0xFFu, cb = (colour >> 8) & 0xFFu;
+            if (state == 0) {
+                cr >>= 1; cg >>= 1; cb >>= 1;
+            } else {
+                cr = 127u + (cr >> 1); cg = 127u + (cg >> 1); cb = 127u + (cb >> 1);
+            }
+            colour = (cr << 24) | (cg << 16) | (cb << 8) | 0xFFu;
+        }
+    }
+    return colour;
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    int width = int(w[H_WIDTH]);
+    if (p.x >= width || p.y >= int(w[H_ROWS]))
+        return;
+    uint mode = w[H_MODE], H = w[H_H], y = uint(p.y);
+    uint colour;
+    if (mode == 0u) {
+        colour = ViewPixel(0u, y, p.x, width);
+    } else if (mode == 2u) {
+        int w1 = int(w[H_W1]);
+        colour = p.x < w1 ? ViewPixel(0u, y, p.x, w1) : ViewPixel(1u, y, p.x - w1, width - w1);
+    } else {
+        bool second = y >= H / 2u;
+        uint local = second ? y - H / 2u : y;
+        uint span = second ? H - H / 2u : H / 2u;
+        uint first_row = local * H / span, end_row = (local + 1u) * H / span;
+        if (end_row <= first_row)
+            end_row = first_row + 1u;
+        if (end_row > H)
+            end_row = H;
+        uint sr = 0u, sg = 0u, sb = 0u;
+        for (uint src = first_row; src < end_row; src++) {
+            uint c = ViewPixel(second ? 1u : 0u, src, p.x, width);
+            sr += (c >> 24) & 0xFFu;
+            sg += (c >> 16) & 0xFFu;
+            sb += (c >> 8) & 0xFFu;
+        }
+        uint n = end_row - first_row;
+        colour = ((sr / n) << 24) | ((sg / n) << 16) | ((sb / n) << 8) | 0xFFu;
+    }
+
+    uvec4 rgba = uvec4((colour >> 24) & 0xFFu, (colour >> 16) & 0xFFu, (colour >> 8) & 0xFFu, colour & 0xFFu);
+    if (blend != 0) {
+        uvec4 last = uvec4(round(imageLoad(picture, p) * 255.0));
+        rgba = (rgba * uint(alpha) + last * uint(255 - alpha)) / 255u;
+    }
+    imageStore(picture, p, vec4(rgba) / 255.0);
+}

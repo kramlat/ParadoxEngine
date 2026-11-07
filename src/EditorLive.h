@@ -28,6 +28,14 @@ extern bool editor_open;
 extern bool editor_playtest; // the players are in the level again (the editor's cursor is where the first player was left): the level is played as edited
 extern bool editor_present; // ... and its level is the one running (the editor's window keeps this up to date): only then do the players hold still and the layouts apply
 
+// Keymaker mode (a level made from nothing, in a zone the game does not have): the zone, act and code ('WNT') its saved files and C code are named by. The game itself keeps running the level the editor was opened in, so
+// the layouts the editor hands the managers are still asked for by that level's own zone and act (editor_session). Cleared when the editor opens a level or closes.
+void Editor_SetTarget(int zone, int act, const char *code);
+bool Editor_HasTarget(void);
+int Editor_TargetZone(void);
+int Editor_TargetAct(void);
+const char *Editor_TargetCode(void);
+
 // Takes the level a game is in: copies its layouts (either may be NULL) into the model and the live buffers, and starts using them
 void Editor_Open(int zone, int act, const uint8_t *objects, const uint8_t *rings);
 // Hands the game's own layouts back (the live ones are dropped); asks for a reload so the level is as the tables have it
@@ -59,9 +67,15 @@ void Editor_ClearLevelObjects(void);
 // ---- The terrain: the level's tiles, blocks, chunks, collision indices and palette, as they are loaded (the editor changes them in place and the level shows it) ----
 // The game's level loaders say how much they loaded (the data is what was decompressed: its size is where the original ends), for the editor's lists and its saved files.
 void Editor_NoteArt(uint8_t *art, size_t bytes);  // the level's tiles, 32 bytes each, in the game's own buffer (the level's art is also in the video memory from tile 0)
+void Editor_NoteArtCapacity(size_t bytes);         // how big that buffer is (how many tiles the editor can make room for)
+size_t Editor_ArtCapacity(void);
 void Editor_NoteBlocks(size_t bytes);             // level_map16: 8 bytes a block (four tile words)
 void Editor_NoteChunks(size_t bytes);             // level_map128: 128 bytes a chunk (8 x 8 words: block, flips, solidity)
 void Editor_NoteSolids(int path, size_t bytes);   // coll_index[path]: a collision curve for each block
+
+// The level's own animated art runs over the tiles the editor loaded from another zone: an import (Game_EditorImportTerrain) turns it off, until the editor closes. The games ask before they animate.
+void Editor_SetAnimationOff(bool off);
+bool Editor_AnimationOff(void);
 
 uint8_t *Editor_Art(size_t *bytes);
 uint8_t *Editor_Blocks(size_t *bytes);

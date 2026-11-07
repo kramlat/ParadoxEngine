@@ -21,6 +21,9 @@ static uint8_t live_rings[EDITOR_MAX_RINGS * 4 + 4];
 static bool reload_pending;
 static uint16_t colour[4][16];
 static bool colour_set[4][16];
+static bool target_set;
+static int target_zone, target_act;
+static char target_code[16];
 
 static void WriteLive(void) {
     EditorLevel_WriteObjects(&editor_session.level, live_objects, sizeof(live_objects));
@@ -106,6 +109,7 @@ void Editor_CameraEnd(void) {
 }
 
 void Editor_Open(int zone, int act, const uint8_t *objects, const uint8_t *rings) {
+    target_set = false;
     EditorLevel_Clear(&editor_session.level);
     EditorLevel_LoadObjects(&editor_session.level, objects);
     EditorLevel_LoadRings(&editor_session.level, rings);
@@ -118,9 +122,28 @@ void Editor_Open(int zone, int act, const uint8_t *objects, const uint8_t *rings
     Game_EditorSetMode(true); // (the level is edited, not played: a game mode of its own)
 }
 
+void Editor_SetTarget(int zone, int act, const char *code) {
+    target_set = code != NULL;
+    target_zone = zone;
+    target_act = act;
+    target_code[0] = 0;
+    if (code != NULL)
+        strncat(target_code, code, sizeof(target_code) - 1);
+}
+bool Editor_HasTarget(void) { return editor_open && target_set; }
+int Editor_TargetZone(void) { return target_zone; }
+int Editor_TargetAct(void) { return target_act; }
+const char *Editor_TargetCode(void) { return target_code; }
+
+static bool animation_off;
+void Editor_SetAnimationOff(bool off) { animation_off = off; }
+bool Editor_AnimationOff(void) { return editor_open && animation_off; }
+
 void Editor_Close(void) {
     if (!editor_open)
         return;
+    animation_off = false;
+    target_set = false;
     if (Editor_Editing()) { // (the player is where the cursor is when the level is played again)
         player->x_pos.f.u = (int16_t)cursor_x;
         player->y_pos.f.u = (int16_t)cursor_y;
@@ -168,6 +191,9 @@ static uint8_t *art_buffer;
 static size_t art_bytes, block_bytes, chunk_bytes, solid_bytes[2];
 
 void Editor_NoteArt(uint8_t *art, size_t bytes) { art_buffer = art; art_bytes = bytes; }
+static size_t art_capacity;
+void Editor_NoteArtCapacity(size_t bytes) { art_capacity = bytes; }
+size_t Editor_ArtCapacity(void) { return art_capacity > art_bytes ? art_capacity : art_bytes; }
 void Editor_NoteBlocks(size_t bytes) { block_bytes = bytes; }
 void Editor_NoteChunks(size_t bytes) { chunk_bytes = bytes; }
 void Editor_NoteSolids(int path, size_t bytes) { solid_bytes[path & 1] = bytes; }

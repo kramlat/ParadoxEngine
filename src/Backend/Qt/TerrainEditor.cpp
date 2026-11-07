@@ -1,7 +1,12 @@
 #include "TerrainEditor.h"
+#include "TileGpu.h"
 
 #include "../../DebugPeek.h"
 #include "../../EditorLive.h"
+#include "../../GameInterface.h"
+extern "C" {
+#include "../../EditorTerrain.h"
+}
 extern "C" {
 #include "../../Kosinski.h"
 #include "../../LevelLayout.h"
@@ -9,6 +14,9 @@ extern "C" {
 }
 
 #include <QCheckBox>
+#include <QClipboard>
+#include <QGuiApplication>
+#include <QLineEdit>
 #include <QComboBox>
 #include <QDialog>
 #include <QDir>
@@ -17,6 +25,7 @@ extern "C" {
 #include <QHBoxLayout>
 #include <QImage>
 #include <QLabel>
+#include <QMessageBox>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -30,6 +39,7 @@ extern "C" {
 
 #include <cstdlib>
 #include <functional>
+#include <vector>
 
 extern "C" {
 extern int screen_width, screen_height; // the picture's size (Video.c)
@@ -75,6 +85,8 @@ struct State {
 	int supp_tile = -1, supp_block = -1;      // where it starts, in tiles and in blocks (-1: this level has none)
 	int supp_default_tile = -1, supp_default_block = -1, supp_zone = -1;
 	bool block_night = false;                 // the Blocks tab in night mode: the tiles that are not high priority darkened
+	QString overlay_name;                     // the overlay being made (Overlay tab) and the zone it goes over
+	int overlay_base = -1;
 	int solid_view = 1;                       // the solids drawn over the chunk's blocks: 0 none, 1 path 1, 2 path 2
 	QWidget *palette_pane = nullptr, *tile_grid = nullptr, *tile_canvas = nullptr, *block_grid = nullptr, *block_canvas = nullptr, *chunk_grid = nullptr, *chunk_canvas = nullptr, *solid_pane = nullptr;
 	std::function<void()> refresh_all;
@@ -149,6 +161,310 @@ void Changed(bool redraw) {
 		s.refresh_all();
 }
 
+// ---- Copy, paste, insert, delete and move (EditorTerrain.h) ----
+// A row of buttons under a list of tiles, blocks or chunks: they act on the selected one, and what names the ones that change number is rewritten (EditorTerrain does that; the editor keeps its selection and
+// where the overlay starts in step)
+class OpsRow : public QWidget {
+public:
+	OpsRow(EditorTerrainKind kind, int *selected, QWidget *parent) : QWidget(parent), kind_(kind), selected_(selected) {
+		auto *box = new QVBoxLayout(this);
+		box->setContentsMargins(0, 0, 0, 0);
+		auto *row = new QHBoxLayout();
+		copy_ = new QPushButton("Copy", this);
+		paste_ = new QPushButton("Paste over", this);
+		insert_ = new QPushButton("Insert after", this);
+		delete_ = new QPushButton("Delete", this);
+		move_to_ = new QSpinBox(this);
+		move_to_->setPrefix("Move to ");
+		auto *move = new QPushButton("Move", this);
+		for (QWidget *w : std::initializer_list<QWidget *>{ copy_, paste_, insert_, delete_, move_to_, move })
+			row->addWidget(w);
+		row->addStretch();
+		box->addLayout(row);
+		status_ = Note(QString(), this);
+		box->addWidget(status_);
+		copy_->setToolTip("Copies the selected one (a block takes its two collision curves with it).");
+		paste_->setToolTip("Puts the copy over the selected one.");
+		insert_->setToolTip("Adds a blank one after the selected one; the ones after it are numbered one higher, and everything that names them is changed to match. Not at the limit.");
+		delete_->setToolTip("Removes the selected one; the ones after it are numbered one lower and what named it names the blank one (number 0). Needs at least two.");
+		move->setToolTip("Moves the selected one to another number; what names the ones between is changed to match.");
+		connect(copy_, &QPushButton::clicked, this, [this] { Done(EditorTerrain_Copy(kind_, *selected_), "Copied."); });
+		connect(paste_, &QPushButton::clicked, this, [this] { Edit(EditorTerrain_Paste(kind_, *selected_), "Pasted.", false); });
+		connect(insert_, &QPushButton::clicked, this, [this] {
+			const int at = *selected_ + 1;
+			if (Edit(EditorTerrain_Insert(kind_, at), "Inserted.", true))
+				*selected_ = at;
+		});
+		connect(delete_, &QPushButton::clicked, this, [this] {
+			const int index = *selected_;
+			if (Edit(EditorTerrain_Delete(kind_, index), "Deleted.", true))
+				*selected_ = qMin(index, int(EditorTerrain_Count(kind_)) - 1);
+		});
+		connect(move, &QPushButton::clicked, this, [this] {
+			const int from = *selected_;
+			if (Edit(EditorTerrain_Move(kind_, from, move_to_->value()), "Moved.", true))
+				*selected_ = move_to_->value();
+		});
+	}
+
+	void Load() {
+		const int count = int(EditorTerrain_Count(kind_));
+		const int limit = int(EditorTerrain_Capacity(kind_));
+		move_to_->setRange(1, qMax(1, count - 1));
+		paste_->setEnabled(EditorTerrain_HasCopy(kind_));
+		insert_->setEnabled(count < limit);
+		delete_->setEnabled(count >= 2);
+		if (status_->text().isEmpty() || !keep_)
+			status_->setText(QString("%1 of at most %2.").arg(count).arg(limit));
+		keep_ = false;
+	}
+
+private:
+	static QString Message(const char *why) { return QString("Cannot: %1.").arg(why); }
+
+	void Done(const char *why, const char *ok) {
+		status_->setText(why ? Message(why) : QString(ok));
+		keep_ = true;
+		Load();
+	}
+
+	// Runs an edit; `renumbered` says the numbers of other ones changed (the overlay's start and the pictures follow). True when it was done.
+	bool Edit(const char *why, const char *ok, bool renumbered) {
+		if (why != nullptr) {
+			Done(why, ok);
+			return false;
+		}
+		if (renumbered) {
+			s.supp_tile = s.supp_tile >= 0 ? EditorTerrain_Mapped(EDITOR_TERRAIN_TILE, s.supp_tile) : s.supp_tile;
+			s.supp_block = s.supp_block >= 0 ? EditorTerrain_Mapped(EDITOR_TERRAIN_BLOCK, s.supp_block) : s.supp_block;
+			s.tile = EditorTerrain_Mapped(EDITOR_TERRAIN_TILE, s.tile);
+			s.block = EditorTerrain_Mapped(EDITOR_TERRAIN_BLOCK, s.block);
+			s.chunk = EditorTerrain_Mapped(EDITOR_TERRAIN_CHUNK, s.chunk);
+		}
+		status_->setText(ok);
+		keep_ = true;
+		Changed(true);
+		return true;
+	}
+
+	EditorTerrainKind kind_;
+	int *selected_;
+	QPushButton *copy_, *paste_, *insert_, *delete_;
+	QSpinBox *move_to_;
+	QLabel *status_;
+	bool keep_ = false;
+};
+
+QVector<OpsRow *> ops_rows;
+void LoadOpsRows() {
+	for (OpsRow *row : ops_rows)
+		row->Load();
+}
+
+// ---- Import: another zone's terrain in place of this level's (the game's Game_EditorImportTerrain: no animation comes with it) ----
+class ImportPane : public QWidget {
+public:
+	ImportPane() {
+		auto *layout = new QVBoxLayout(this);
+		layout->addWidget(Note("Takes another zone's terrain in place of this level's: a quick start for a new zone (a winter version of Emerald Hill is its tiles, blocks and chunks with a new palette and some tiles drawn over). Nothing that animates comes with it: the animated art and the palette cycles are the level's own.", this));
+		auto *row = new QHBoxLayout();
+		zone_ = new QComboBox(this);
+		act_ = new QComboBox(this);
+		for (int a = 0; a < 4; a++)
+			act_->addItem(QString("Act %1").arg(a + 1), a);
+		row->addWidget(zone_, 1);
+		row->addWidget(act_);
+		layout->addLayout(row);
+		const char *names[5] = { "Tiles", "Blocks", "Chunks", "Collision (the blocks' curves)", "Palette (lines 1 to 3)" };
+		for (int i = 0; i < 5; i++) {
+			part_[i] = new QCheckBox(names[i], this);
+			part_[i]->setChecked(true);
+			layout->addWidget(part_[i]);
+		}
+		auto *load = new QPushButton("Load into this level", this);
+		layout->addWidget(load);
+		status_ = Note(QString(), this);
+		layout->addWidget(status_);
+		layout->addStretch();
+		connect(load, &QPushButton::clicked, this, [this] { Load(); });
+	}
+
+	void Refill() { // the zones that have terrain to take (the level being edited's too: it is a way back)
+		EditorPeek peek;
+		Peek_EditorState(&peek);
+		const int act = qMax(0, act_->currentData().toInt());
+		const int keep = zone_->currentData().toInt();
+		zone_->blockSignals(true);
+		zone_->clear();
+		for (int z = 0; z < peek.zone_count; z++) {
+			if (!Game_EditorZoneHasTerrain(z, act))
+				continue;
+			const char *name = Peek_ZoneName(z), *code = Peek_ZoneCode(z);
+			zone_->addItem(QString("%1 (zone %2%3)").arg(name ? name : (code ? code : "zone")).arg(z).arg(code ? QString(", ") + code : QString()), z);
+		}
+		const int at = zone_->findData(keep);
+		zone_->setCurrentIndex(at >= 0 ? at : 0);
+		zone_->blockSignals(false);
+	}
+
+private:
+	void Load() {
+		if (zone_->count() == 0) {
+			status_->setText("No zone has terrain to take.");
+			return;
+		}
+		unsigned parts = 0;
+		static const unsigned bits[5] = { EDITOR_IMPORT_TILES, EDITOR_IMPORT_BLOCKS, EDITOR_IMPORT_CHUNKS, EDITOR_IMPORT_SOLIDS, EDITOR_IMPORT_PALETTE };
+		for (int i = 0; i < 5; i++)
+			if (part_[i]->isChecked())
+				parts |= bits[i];
+		if (parts == 0) {
+			status_->setText("Nothing is ticked.");
+			return;
+		}
+		if (QMessageBox::question(this, "Load terrain", "This replaces what is ticked in this level (the level's own tiles, blocks, chunks, collision and palette) with the other zone's. Go on?") != QMessageBox::Yes)
+			return;
+		const char *why = Game_EditorImportTerrain(zone_->currentData().toInt(), act_->currentData().toInt(), parts);
+		if (why != nullptr) {
+			status_->setText(QString("Cannot: %1.").arg(why));
+			return;
+		}
+		// the layout's chunks that the new set does not have are the empty chunk now
+		if (parts & EDITOR_IMPORT_CHUNKS) {
+			size_t bytes;
+			uint8_t *layout = Editor_Layout(&bytes);
+			const int chunks = ChunkCount();
+			for (size_t i = 0; layout != nullptr && i < bytes; i++)
+				if (layout[i] >= chunks)
+					layout[i] = 0;
+		}
+		s.supp_tile = s.supp_block = -1; // (the overlay was the old terrain's)
+		s.tile = s.block = s.chunk = 0;
+		status_->setText("Loaded.");
+		Changed(true);
+	}
+
+	QComboBox *zone_, *act_;
+	QCheckBox *part_[5];
+	QLabel *status_;
+};
+
+ImportPane *import_pane = nullptr;
+
+// ---- Overlay: a tileset and blockset of this level's own over another zone's (Hill Top over Emerald Hill) ----
+// The tiles and blocks from the overlay's start on are the overlay's: the editor saves them apart (<name>Secondary) and the other zone's stay the other zone's files. The C code that loads such a level (its level
+// load block row, and where the overlay starts) goes to the clipboard.
+class OverlayPane : public QWidget {
+public:
+	OverlayPane() {
+		auto *layout = new QVBoxLayout(this);
+		layout->addWidget(Note("An overlay is tiles and blocks of this level's own that go after another zone's (its base): Hill Top is Emerald Hill's tiles and blocks with its own after them. Load the base from the Import tab, name the overlay, and start it: the tiles and blocks you insert after that point are the overlay's (the Tiles and Blocks tabs can then show the overlay or the base alone). Saving writes the overlay apart.", this));
+		auto *row = new QHBoxLayout();
+		base_ = new QComboBox(this);
+		name_ = new QLineEdit(this);
+		name_->setPlaceholderText("Overlay name, e.g. Winter");
+		row->addWidget(base_, 1);
+		row->addWidget(name_);
+		layout->addLayout(row);
+		auto *buttons = new QHBoxLayout();
+		auto *start = new QPushButton("Start the overlay here (after the last tile and block)", this);
+		auto *clear = new QPushButton("Remove the overlay mark", this);
+		auto *copy = new QPushButton("Copy the C code", this);
+		buttons->addWidget(start);
+		buttons->addWidget(clear);
+		buttons->addWidget(copy);
+		layout->addLayout(buttons);
+		status_ = Note(QString(), this);
+		layout->addWidget(status_);
+		layout->addStretch();
+		connect(start, &QPushButton::clicked, this, [this] { Start(); });
+		connect(clear, &QPushButton::clicked, this, [this] {
+			s.supp_tile = s.supp_block = -1;
+			s.overlay_name.clear();
+			status_->setText("The overlay mark is removed (nothing is deleted).");
+			if (s.refresh_all)
+				s.refresh_all();
+		});
+		connect(copy, &QPushButton::clicked, this, [this] { Copy(); });
+	}
+
+	void Refill() {
+		EditorPeek peek;
+		Peek_EditorState(&peek);
+		const int keep = base_->currentData().toInt();
+		base_->blockSignals(true);
+		base_->clear();
+		for (int z = 0; z < peek.zone_count; z++) {
+			if (!Game_EditorZoneHasTerrain(z, 0))
+				continue;
+			const char *name = Peek_ZoneName(z), *code = Peek_ZoneCode(z);
+			base_->addItem(QString("Base: %1 (zone %2)").arg(name ? name : (code ? code : "zone")).arg(z), z);
+		}
+		const int at = base_->findData(keep);
+		base_->setCurrentIndex(at >= 0 ? at : 0);
+		base_->blockSignals(false);
+		if (name_->text().isEmpty() && !s.overlay_name.isEmpty())
+			name_->setText(s.overlay_name);
+	}
+
+private:
+	static QString Identifier(const QString &text) { // letters and digits, a letter first: what the C names and the files are made of
+		QString out;
+		for (const QChar c : text)
+			if (c.isLetterOrNumber() && c.unicode() < 128)
+				out += c;
+		return out.isEmpty() || out[0].isDigit() ? QString() : out;
+	}
+
+	void Start() {
+		const QString name = Identifier(name_->text());
+		if (name.isEmpty()) {
+			status_->setText("Name the overlay first (letters and digits).");
+			return;
+		}
+		s.overlay_name = name;
+		s.overlay_base = base_->currentData().toInt();
+		s.supp_tile = TileCount();
+		s.supp_block = BlockCount();
+		status_->setText(QString("The overlay starts at tile %1 ($%2) and block %3 ($%4). Insert tiles and blocks after the last ones.").arg(s.supp_tile).arg(QString::number(s.supp_tile, 16).toUpper()).arg(s.supp_block).arg(QString::number(s.supp_block, 16).toUpper()));
+		if (s.refresh_all)
+			s.refresh_all();
+	}
+
+	void Copy() {
+		if (s.overlay_name.isEmpty() || s.supp_tile < 0 || s.supp_block < 0) {
+			status_->setText("Start an overlay first.");
+			return;
+		}
+		int plc1 = 0, plc2 = 0, pal = 0;
+		if (!Game_EditorLoadBlockInfo(s.overlay_base, 0, &plc1, &plc2, &pal)) {
+			status_->setText("The base zone has no terrain to name.");
+			return;
+		}
+		const QString base = Peek_ZoneCode(s.overlay_base) ? Peek_ZoneCode(s.overlay_base) : "BASE";
+		const QString name = s.overlay_name;
+		const auto folder = [](int kind) { const char *f = Peek_TerrainFolder(kind); return QString(f ? f : "Res"); };
+		const QString zone = name.toUpper();
+		QString code;
+		code += QString("// %1: %2's tiles and blocks with an overlay of its own (the level editor's Overlay tab). Save in the editor first: it writes\n").arg(name, base);
+		code += QString("// %1/%2Secondary and %3/%2Secondary; add those two files to the project's resources (the names below follow the folders' own: change them if the base's differ).\n").arg(folder(0), name, folder(1));
+		code += QString("// The overlay's tiles start at tile $%1 and its blocks at block $%2.\n").arg(QString::number(s.supp_tile, 16).toUpper()).arg(QString::number(s.supp_block, 16).toUpper());
+		code += "\n// the level load block table (the zone's row, an entry for each of its acts):\n";
+		code += QString("[ZoneId_%1] = LLB_ACTS({ %2, %3, %4,\n").arg(zone).arg(plc1).arg(plc2).arg(pal);
+		code += QString("    { %1_%2, %1_%3Secondary }, { %4_%2, %4_%3Secondary }, { %5_%2, %5_%2 } }),\n").arg(folder(0), base, name, folder(1), folder(2));
+		code += "\n// Peek_LevelSupplement (where the editor is told the overlay starts):\n";
+		code += QString("if (zone == ZoneId_%1) { *tile_start = 0x%2; *block_start = 0x%3; return true; }\n").arg(zone).arg(QString::number(s.supp_tile, 16).toUpper()).arg(QString::number(s.supp_block, 16).toUpper());
+		QGuiApplication::clipboard()->setText(code);
+		status_->setText("The C code is on the clipboard.");
+	}
+
+	QComboBox *base_;
+	QLineEdit *name_;
+	QLabel *status_;
+};
+
+OverlayPane *overlay_pane = nullptr;
+
 // The chunk and plane pictures draw their tiles from the video memory, where the level's animated art (the cactus tops, waterfalls, ...) moves, not from the art as loaded
 bool live_tiles = false;
 struct LiveTiles {
@@ -221,6 +537,208 @@ void DrawChunk(QPainter *p, int chunk, const QRect &at) {
 		}
 }
 
+void DrawSolidOverlay(QPainter *p, uint16_t word, int path, const QRect &at);
+const QImage &ChunkThumb(int chunk, int size, int mode = 0);
+
+// Where a pane's tiles go: drawn now through QPainter (the CPU, with the functions above), or listed as items for the GPU's tile view (TileGpu.h), which looks up the same things in its shader.
+// priority_dim and live_tiles say what they say for both.
+class TileSink {
+public:
+	explicit TileSink(QPainter *p) : painter(p) {}
+	explicit TileSink(std::vector<TileItem> *list) : items(list) {}
+
+	void Fill(const QRect &at, const QColor &colour) {
+		if (painter != nullptr)
+			painter->fillRect(at, colour);
+		else
+			Add(at, colour.rgba(), TILE_ITEM_FILL);
+	}
+	// A tile in a palette line, unflipped (the Tiles tab's)
+	void Tile(int tile, int line, const QRect &at) {
+		if (painter != nullptr)
+			painter->drawImage(at, TileImage(tile, line, false, false));
+		else
+			Add(at, uint32_t(tile), TILE_ITEM_TILE | Live() | uint32_t(line & 3) << 8);
+	}
+	// A tile word: its flips, palette line and priority (DrawTileWord)
+	void Word(uint16_t word, const QRect &at) {
+		if (painter != nullptr) {
+			DrawTileWord(painter, word, at);
+			return;
+		}
+		Add(at, word & 0x7FFu, TILE_ITEM_TILE | Live() | ((word >> 13) & 3u) << 8 | ((word & 0x0800) ? TILE_ITEM_X_FLIP : 0) | ((word & 0x1000) ? TILE_ITEM_Y_FLIP : 0) |
+		                           ((priority_dim && !(word & 0x8000)) ? TILE_ITEM_DIM : 0));
+	}
+	void Block(int block, const QRect &at, bool x_flip = false, bool y_flip = false) {
+		if (painter != nullptr)
+			DrawBlock(painter, block, at, x_flip, y_flip);
+		else
+			Add(at, uint32_t(block), TILE_ITEM_BLOCK | Live() | (x_flip ? TILE_ITEM_X_FLIP : 0) | (y_flip ? TILE_ITEM_Y_FLIP : 0) | (priority_dim ? TILE_ITEM_DIM : 0));
+	}
+	// A chunk from the video memory's tiles (DrawChunk)
+	void Chunk(int chunk, const QRect &at) {
+		if (painter != nullptr)
+			DrawChunk(painter, chunk, at);
+		else
+			Add(at, uint32_t(chunk), TILE_ITEM_CHUNK | TILE_ITEM_LIVE | (priority_dim ? TILE_ITEM_DIM : 0));
+	}
+	// A chunk's picture in a plane's view (ChunkThumb: mode 0 none, 1 priority, 2 and 3 the solids of path A and B), its top left at `at`
+	void Thumb(int chunk, const QRect &at, int mode) {
+		if (painter != nullptr) {
+			painter->drawImage(at.topLeft(), ChunkThumb(chunk, at.width(), mode));
+			return;
+		}
+		Fill(at, QColor(24, 24, 28));
+		if (chunk != 0)
+			Add(at, uint32_t(chunk), TILE_ITEM_CHUNK | TILE_ITEM_LIVE | (mode == 1 ? TILE_ITEM_DIM : 0) | (mode >= 2 ? uint32_t(mode - 1) << 10 : 0));
+	}
+	// The solids of a path (1 or 2) over a chunk's block (DrawSolidOverlay)
+	void Solid(uint16_t word, int path, const QRect &at) {
+		if (painter != nullptr)
+			DrawSolidOverlay(painter, word, path, at);
+		else
+			Add(at, 0, TILE_ITEM_SOLID | uint32_t(path & 3) << 10 | uint32_t(word) << 16);
+	}
+
+private:
+	uint32_t Live() const { return live_tiles ? TILE_ITEM_LIVE : 0; }
+	void Add(const QRect &at, uint32_t index, uint32_t flags) {
+		items->push_back(TileItem{ float(at.x()), float(at.y()), float(at.width()), float(at.height()), index, flags });
+	}
+
+	QPainter *painter = nullptr;
+	std::vector<TileItem> *items = nullptr;
+};
+
+// A pane that shows tiles: it lists them (Tiles) and draws its marks over them (Marks), for the part of it in sight. On the GPU a tile view draws the tiles where the pane is in sight (a pane in a
+// scroll area can be far bigger than a picture the GPU makes) under a see-through layer that the marks are painted on; else the pane paints both itself. A device that cannot draw them turns
+// the pane back to the CPU.
+class TilePane : public QWidget {
+public:
+	// A redraw reaches the GPU view and the marks over it too (a QWidget::update of the pane alone does not: they are children that draw themselves). Hides QWidget::update for every caller
+	// that holds the pane by its own type; a caller with a QWidget pointer uses Redraw below.
+	void update() {
+		QWidget::update();
+		if (view != nullptr) {
+			view->update();
+			marks->update();
+		}
+	}
+	TilePane() {
+		if (!TileGpu_Wanted())
+			return;
+		view = new TileView(this);
+		view->background = background;
+		view->list = [this](std::vector<TileItem> &items, const QRect &area) {
+			TileSink sink(&items);
+			Tiles(sink, area);
+		};
+		view->failed = [this] { QMetaObject::invokeMethod(this, [this] { UseCpu(); }, Qt::QueuedConnection); };
+		marks = new MarkLayer(this);
+		view->hide();
+		marks->hide();
+	}
+
+protected:
+	virtual void Tiles(TileSink &sink, const QRect &area) = 0;
+	virtual void Marks(QPainter &p, const QRect &area) { (void)p; (void)area; }
+
+	void paintEvent(QPaintEvent *e) override {
+		QPainter p(this);
+		if (view != nullptr) {
+			p.fillRect(e->rect(), background); // (until the view is where the pane is in sight)
+			if (view->geometry() != Visible() || view->isHidden() == !Visible().isEmpty())
+				QMetaObject::invokeMethod(this, [this] { Place(); }, Qt::QueuedConnection);
+			return;
+		}
+		p.fillRect(e->rect(), background);
+		TileSink sink(&p);
+		Tiles(sink, e->rect());
+		Marks(p, e->rect());
+	}
+	void moveEvent(QMoveEvent *e) override {
+		QWidget::moveEvent(e);
+		Place();
+	}
+	void resizeEvent(QResizeEvent *e) override {
+		QWidget::resizeEvent(e);
+		Place();
+	}
+
+	void SetBackground(const QColor &colour) {
+		background = colour;
+		if (view != nullptr)
+			view->background = colour;
+	}
+
+	QColor background = QColor(24, 24, 28);
+
+private:
+	// The marks' layer: see-through, over the view
+	class MarkLayer : public QWidget {
+	public:
+		explicit MarkLayer(TilePane *pane) : QWidget(pane), pane_(pane) {
+			setAttribute(Qt::WA_TransparentForMouseEvents);
+			setFocusPolicy(Qt::NoFocus);
+		}
+
+	protected:
+		void paintEvent(QPaintEvent *) override {
+			QPainter p(this);
+			p.translate(-pos());
+			pane_->Marks(p, geometry());
+		}
+
+	private:
+		TilePane *pane_;
+	};
+
+	// The part of the pane in sight: all of it, or what the scroll area's view shows of it
+	QRect Visible() const {
+		QRect r = rect();
+		if (const QWidget *parent = parentWidget())
+			r &= QRect(mapFromParent(QPoint(0, 0)), parent->size());
+		return r;
+	}
+
+	void Place() {
+		if (view == nullptr)
+			return;
+		const QRect area = Visible();
+		if (area.isEmpty()) {
+			view->hide();
+			marks->hide();
+			return;
+		}
+		view->area = area;
+		view->setGeometry(area);
+		marks->setGeometry(area);
+		view->show();
+		marks->show();
+		marks->raise();
+		view->update();
+	}
+
+	void UseCpu() {
+		delete view;
+		delete marks;
+		view = nullptr;
+		marks = nullptr;
+		update();
+	}
+
+	TileView *view = nullptr;
+	MarkLayer *marks = nullptr;
+};
+
+// Redraws a widget that may be a TilePane (held by a plain QWidget pointer, as the animated list does)
+void Redraw(QWidget *widget) {
+	if (auto *pane = dynamic_cast<TilePane *>(widget))
+		pane->update();
+	else
+		widget->update();
+}
+
 // Blocks that some chunk marks solid on a path while the block has no collision curve there (the level walks through them): what the Blocks tab outlines in orange, to be given a curve in the Solids tab
 bool NeedsCurve(int block, int path) {
 	static QVector<uint8_t> need[2];
@@ -245,32 +763,41 @@ bool NeedsCurve(int block, int path) {
 	return block >= 0 && block < 0x400 && need[path & 1][block];
 }
 
-// A grid of things in a scroll area: `count` cells of `cell` pixels, `columns` to a row; a click selects
-class Grid : public QWidget {
+// A grid of things in a scroll area: `count` cells of `cell` pixels, `columns` to a row; a click selects. `draw` puts a cell's tiles down, `mark` draws over them
+class Grid : public TilePane {
 public:
-	Grid(int columns, int cell, std::function<int()> count, std::function<void(QPainter *, int, const QRect &)> draw, int *selected, std::function<void()> picked, std::function<int()> first = nullptr)
-	    : columns_(columns), cell_(cell), count_(std::move(count)), draw_(std::move(draw)), selected_(selected), picked_(std::move(picked)), first_(std::move(first)) {}
+	Grid(int columns, int cell, std::function<int()> count, std::function<void(TileSink &, int, const QRect &)> draw, int *selected, std::function<void()> picked, std::function<int()> first = nullptr,
+	     std::function<void(QPainter *, int, const QRect &)> mark = nullptr)
+	    : columns_(columns), cell_(cell), count_(std::move(count)), draw_(std::move(draw)), mark_(std::move(mark)), selected_(selected), picked_(std::move(picked)), first_(std::move(first)) {}
 
 	QSize sizeHint() const override { return QSize(columns_ * cell_ + 1, qMax(1, (count_() + columns_ - 1) / columns_) * cell_ + 1); }
 	void Resize() { setFixedSize(sizeHint()); update(); }
 
 protected:
-	void paintEvent(QPaintEvent *) override {
-		QPainter p(this);
-		p.fillRect(rect(), QColor(24, 24, 28));
+	// The cells in `area`, each as `cell(i, k, at)` (the item; k is where it is in the grid: a mode can show only some of them)
+	template <typename F> void EachCell(const QRect &area, F cell) {
 		const int first = first_ ? first_() : 0;
-		for (int k = 0; k < count_(); k++) {
-			const int i = first + k; // (the item; k is where it is in the grid: a mode can show only some of them)
+		const int count = count_();
+		const int k0 = qMax(0, area.top() / cell_) * columns_, k1 = qMin(count, (area.bottom() / cell_ + 1) * columns_);
+		for (int k = k0; k < k1; k++) {
 			const QRect at((k % columns_) * cell_, (k / columns_) * cell_, cell_, cell_);
-			if (!at.intersects(visibleRegion().boundingRect()))
-				continue;
-			draw_(&p, i, at);
+			if (at.intersects(area))
+				cell(first + k, at);
+		}
+	}
+	void Tiles(TileSink &sink, const QRect &area) override {
+		EachCell(area, [&](int i, const QRect &at) { draw_(sink, i, at); });
+	}
+	void Marks(QPainter &p, const QRect &area) override {
+		EachCell(area, [&](int i, const QRect &at) {
+			if (mark_)
+				mark_(&p, i, at);
 			if (i == *selected_) {
 				p.setPen(QPen(QColor(255, 160, 0), 2));
 				p.setBrush(Qt::NoBrush);
 				p.drawRect(at.adjusted(1, 1, -1, -1));
 			}
-		}
+		});
 	}
 	void mousePressEvent(QMouseEvent *e) override {
 		const int k = (e->position().toPoint().y() / cell_) * columns_ + e->position().toPoint().x() / cell_;
@@ -284,7 +811,8 @@ protected:
 private:
 	int columns_, cell_;
 	std::function<int()> count_;
-	std::function<void(QPainter *, int, const QRect &)> draw_;
+	std::function<void(TileSink &, int, const QRect &)> draw_;
+	std::function<void(QPainter *, int, const QRect &)> mark_;
 	int *selected_;
 	std::function<void()> picked_;
 	std::function<int()> first_;
@@ -383,14 +911,13 @@ private:
 };
 
 // ---- The tile's pixels: click to paint, right click to pick the colour ----
-class TileCanvas : public QWidget {
+class TileCanvas : public TilePane {
 public:
 	TileCanvas() { setFixedSize(8 * 28, 8 * 28); }
 
 protected:
-	void paintEvent(QPaintEvent *) override {
-		QPainter p(this);
-		p.drawImage(rect(), TileImage(s.tile, s.palette_line, false, false).scaled(8, 8));
+	void Tiles(TileSink &sink, const QRect &) override { sink.Tile(s.tile, s.palette_line, rect()); }
+	void Marks(QPainter &p, const QRect &) override {
 		p.setPen(QColor(0, 0, 0, 90));
 		for (int i = 0; i <= 8; i++) {
 			p.drawLine(i * 28, 0, i * 28, height());
@@ -473,22 +1000,28 @@ protected:
 };
 
 // ---- A block: four tile words ----
-class BlockCanvas : public QWidget {
+class BlockCanvas : public TilePane {
 public:
 	BlockCanvas() { setFixedSize(2 * 72, 2 * 72); }
 
 protected:
-	void paintEvent(QPaintEvent *) override {
-		QPainter p(this);
+	void Tiles(TileSink &sink, const QRect &) override {
+		size_t bytes;
+		const uint8_t *blocks = Editor_Blocks(&bytes);
+		if (blocks == nullptr || size_t(s.block + 1) * 8 > bytes)
+			return;
+		priority_dim = s.block_night;
+		for (int c = 0; c < 4; c++)
+			sink.Word(Be16(blocks + s.block * 8 + c * 2), QRect((c % 2) * 72, (c / 2) * 72, 72, 72));
+		priority_dim = false;
+	}
+	void Marks(QPainter &p, const QRect &) override {
 		size_t bytes;
 		const uint8_t *blocks = Editor_Blocks(&bytes);
 		if (blocks == nullptr || size_t(s.block + 1) * 8 > bytes)
 			return;
 		for (int c = 0; c < 4; c++) {
 			const QRect at((c % 2) * 72, (c / 2) * 72, 72, 72);
-			priority_dim = s.block_night;
-			DrawTileWord(&p, Be16(blocks + s.block * 8 + c * 2), at);
-			priority_dim = false;
 			p.setPen(QPen(c == s.block_cell ? QColor(255, 160, 0) : QColor(0, 0, 0, 120), 2));
 			p.setBrush(Qt::NoBrush);
 			p.drawRect(at.adjusted(1, 1, -1, -1));
@@ -542,7 +1075,7 @@ void DrawSolidOverlay(QPainter *p, uint16_t word, int path, const QRect &at) {
 }
 
 // The chunk: eight by eight blocks. Left click places the selected block, right click picks the one under it
-class ChunkCanvas : public QWidget {
+class ChunkCanvas : public TilePane {
 public:
 	std::function<uint16_t()> flags; // the flips and solidity of what a click places (the word's bits 10-15)
 	std::function<void(uint16_t)> picked_flags;
@@ -550,21 +1083,22 @@ public:
 	ChunkCanvas() { setFixedSize(8 * 40, 8 * 40); }
 
 protected:
-	void paintEvent(QPaintEvent *) override {
-		QPainter p(this);
-		DrawChunk(&p, s.chunk, rect());
-		p.setPen(QColor(0, 0, 0, 90));
-		for (int i = 0; i <= 8; i++) {
-			p.drawLine(i * 40, 0, i * 40, height());
-			p.drawLine(0, i * 40, width(), i * 40);
-		}
-		// the solids of the path being shown, over the blocks
+	void Tiles(TileSink &sink, const QRect &) override {
+		sink.Chunk(s.chunk, rect());
+		// the solids of the path being shown, over the blocks (the grid's lines go over them)
 		size_t bytes;
 		const uint8_t *chunks = Editor_Chunks(&bytes);
 		if (s.solid_view == 0 || chunks == nullptr || size_t(s.chunk + 1) * 128 > bytes)
 			return;
 		for (int i = 0; i < 64; i++)
-			DrawSolidOverlay(&p, Be16(chunks + s.chunk * 128 + i * 2), s.solid_view, QRect((i % 8) * 40, (i / 8) * 40, 40, 40));
+			sink.Solid(Be16(chunks + s.chunk * 128 + i * 2), s.solid_view, QRect((i % 8) * 40, (i / 8) * 40, 40, 40));
+	}
+	void Marks(QPainter &p, const QRect &) override {
+		p.setPen(QColor(0, 0, 0, 90));
+		for (int i = 0; i <= 8; i++) {
+			p.drawLine(i * 40, 0, i * 40, height());
+			p.drawLine(0, i * 40, width(), i * 40);
+		}
 	}
 	void mousePressEvent(QMouseEvent *e) override { Use(e); }
 	void mouseMoveEvent(QMouseEvent *e) override { Use(e); }
@@ -599,6 +1133,48 @@ private:
 };
 
 // ---- The solids: the collision curve each block has on each path, and the curve ----
+// The block of the Solids tab, at 8 times its size, with the curve of each path over it
+class SolidView : public TilePane {
+public:
+	std::function<int(int)> curve; // the curve of path 0 (A) or 1 (B)
+
+	SolidView() {
+		setFixedSize(2 * (16 * 8 + 24), 16 * 8 + 20);
+		SetBackground(palette().color(QPalette::Window));
+	}
+
+protected:
+	void Tiles(TileSink &sink, const QRect &) override {
+		for (int path = 0; path < 2; path++) {
+			const QRect at(path * (16 * 8 + 24), 0, 16 * 8, 16 * 8);
+			sink.Fill(at, QColor(24, 24, 28));
+			sink.Block(s.block, at);
+		}
+	}
+	void Marks(QPainter &p, const QRect &) override {
+		const uint8_t *heights = Editor_HeightMap();
+		const uint8_t *angles = Editor_CurveAngles();
+		for (int path = 0; path < 2; path++) {
+			const int c = curve ? curve(path) : 0;
+			const int x0 = path * (16 * 8 + 24);
+			// the curve laid over the block (path 1 red, path 2 blue), a pixel of the block for each 8 on the screen: the curve's height in a column is how many pixels of the block it fills
+			if (heights != nullptr)
+				for (int x = 0; x < 16; x++) {
+					int h = heights[c * 16 + x];
+					h = h <= 16 ? h : (h >= 0xF0 ? -(256 - h) : 16); // (a negative height hangs from the top)
+					p.fillRect(QRect(x0 + x * 8, h >= 0 ? (16 - h) * 8 : 0, 8, h >= 0 ? h * 8 : -h * 8), path == 0 ? QColor(255, 40, 40, 130) : QColor(60, 120, 255, 130));
+				}
+			p.setPen(QColor(0, 0, 0, 60));
+			for (int i = 0; i <= 16; i++) {
+				p.drawLine(x0 + i * 8, 0, x0 + i * 8, 16 * 8);
+				p.drawLine(x0, i * 8, x0 + 16 * 8, i * 8);
+			}
+			p.setPen(palette().color(QPalette::WindowText));
+			p.drawText(QPoint(x0, 16 * 8 + 14), QString("%1: curve %2, angle $%3").arg(path == 0 ? "A" : "B").arg(c).arg(QString::number(angles ? angles[c] : 0, 16).toUpper(), 2, QChar('0')));
+		}
+	}
+};
+
 class SolidPane : public QWidget {
 public:
 	SolidPane() {
@@ -634,9 +1210,8 @@ public:
 		row->addWidget(same);
 		row->addStretch();
 		layout->addLayout(row);
-		view = new QWidget(this);
-		view->setFixedSize(2 * (16 * 8 + 24), 16 * 8 + 20);
-		view->installEventFilter(this);
+		view = new SolidView();
+		view->curve = [this](int path) { return spin[path]->value(); };
 		layout->addWidget(view);
 		layout->addWidget(Note("Pick a block in the Blocks tab. The block is drawn at 8 times its size with its collision curve over it, a pixel of the block for each 8 here: the curve's heights are how many pixels of each column are solid (from the bottom up; a curve of 0 is empty). Red outlines in the Blocks tab mark blocks that have a curve, orange ones blocks that a chunk marks solid but that have none (the level walks through them).", this));
 		layout->addStretch();
@@ -655,41 +1230,11 @@ public:
 		view->update();
 	}
 
-protected:
-	bool eventFilter(QObject *o, QEvent *e) override {
-		if (o != view || e->type() != QEvent::Paint)
-			return false;
-		QPainter p(view);
-		const uint8_t *heights = Editor_HeightMap();
-		const uint8_t *angles = Editor_CurveAngles();
-		for (int path = 0; path < 2; path++) {
-			const int curve = spin[path]->value();
-			const int x0 = path * (16 * 8 + 24);
-			// the block as it is, a pixel of it for each 8 on the screen, and the curve laid over it (path 1 red, path 2 blue): the curve's height in a column is how many pixels of the block it fills
-			p.fillRect(QRect(x0, 0, 16 * 8, 16 * 8), QColor(24, 24, 28));
-			DrawBlock(&p, s.block, QRect(x0, 0, 16 * 8, 16 * 8));
-			if (heights != nullptr)
-				for (int x = 0; x < 16; x++) {
-					int h = heights[curve * 16 + x];
-					h = h <= 16 ? h : (h >= 0xF0 ? -(256 - h) : 16); // (a negative height hangs from the top)
-					p.fillRect(QRect(x0 + x * 8, h >= 0 ? (16 - h) * 8 : 0, 8, h >= 0 ? h * 8 : -h * 8), path == 0 ? QColor(255, 40, 40, 130) : QColor(60, 120, 255, 130));
-				}
-			p.setPen(QColor(0, 0, 0, 60));
-			for (int i = 0; i <= 16; i++) {
-				p.drawLine(x0 + i * 8, 0, x0 + i * 8, 16 * 8);
-				p.drawLine(x0, i * 8, x0 + 16 * 8, i * 8);
-			}
-			p.setPen(view->palette().color(QPalette::WindowText));
-			p.drawText(QPoint(x0, 16 * 8 + 14), QString("%1: curve %2, angle $%3").arg(path == 0 ? "A" : "B").arg(curve).arg(QString::number(angles ? angles[curve] : 0, 16).toUpper(), 2, QChar('0')));
-		}
-		return true;
-	}
-
 private:
 	QLabel *info;
 	QSpinBox *spin[2];
 	QPushButton *same;
-	QWidget *view;
+	SolidView *view;
 	bool loading = false;
 };
 
@@ -699,7 +1244,7 @@ QHash<int, QImage> thumb_cache; // chunk pictures by size and chunk, drawn once 
 void InvalidateThumbs() { thumb_cache.clear(); }
 
 // The picture of a chunk, with what the plane's view adds to it: mode 0 none, 1 priority (the tiles that are not high priority darkened), 2 and 3 the solids of path A and B over the blocks
-const QImage &ChunkThumb(int chunk, int size, int mode = 0) {
+const QImage &ChunkThumb(int chunk, int size, int mode) {
 	const int key = mode * 1000000 + size * 1000 + chunk;
 	auto found = thumb_cache.find(key);
 	if (found == thumb_cache.end()) {
@@ -730,7 +1275,7 @@ const QImage &ChunkThumb(int chunk, int size, int mode = 0) {
 
 QCheckBox *guides_box = nullptr; // Plane A's "Objects and rings": what is drawn over the chunks to place them by
 
-class LayerCanvas : public QWidget {
+class LayerCanvas : public TilePane {
 public:
 	LayerCanvas(int plane, QLabel *where) : plane_(plane), where_(where) {
 		setMouseTracking(true);
@@ -747,16 +1292,16 @@ public:
 	}
 
 protected:
-	void paintEvent(QPaintEvent *e) override {
-		QPainter p(this);
+	void Tiles(TileSink &sink, const QRect &area) override {
 		size_t bytes;
 		const uint8_t *layout = Editor_Layout(&bytes);
-		const QRect area = e->rect();
 		for (int row = qMax(0, area.top() / zoom_); row <= qMin(15, area.bottom() / zoom_); row++)
 			for (int col = qMax(0, area.left() / zoom_); col <= qMin(127, area.right() / zoom_); col++) {
 				const int chunk = layout[row * 256 + plane_ * 128 + col];
-				p.drawImage(col * zoom_, row * zoom_, ChunkThumb(chunk, zoom_, mode_));
+				sink.Thumb(chunk, QRect(col * zoom_, row * zoom_, zoom_, zoom_), mode_);
 			}
+	}
+	void Marks(QPainter &p, const QRect &area) override {
 		p.setPen(QColor(0, 0, 0, 70));
 		for (int c = area.left() / zoom_; c <= qMin(128, area.right() / zoom_ + 1); c++)
 			p.drawLine(c * zoom_, 0, c * zoom_, height());
@@ -846,6 +1391,17 @@ private:
 
 bool Dirty() { return s.dirty; }
 
+void StartedNewLevel() {
+	s.supp_tile = s.supp_block = -1;
+	s.overlay_name.clear();
+	s.tile = s.block = s.chunk = 0;
+	s.dirty = true;
+	InvalidateThumbs();
+	s.change_count++;
+	if (s.refresh_all)
+		s.refresh_all();
+}
+
 void Reset() {
 	s.dirty = false;
 	s.tile = s.block = s.chunk = 0;
@@ -866,12 +1422,12 @@ void AddTabs(QTabWidget *tabs) {
 		auto *tile_page = new QWidget();
 		auto *tile_layout = new QHBoxLayout(tile_page);
 		auto *tile_grid = new Grid(16, 8 * kTileZoom + 1, [] { int f, c; TileRange(&f, &c); return c; },
+		                           [](TileSink &sink, int i, const QRect &at) { sink.Tile(i, s.palette_line, at.adjusted(0, 0, -1, -1)); },
+		                           &s.tile, [] { if (s.refresh_all) s.refresh_all(); }, [] { int f, c; TileRange(&f, &c); return f; },
 		                           [](QPainter *p, int i, const QRect &at) {
-			                           p->drawImage(at.adjusted(0, 0, -1, -1), TileImage(i, s.palette_line, false, false));
 			                           if (HasSupplement() && i >= s.supp_tile) // (a small mark on the supplement's tiles)
 				                           p->fillRect(QRect(at.x() + 1, at.y() + 1, 4, 4), QColor(0, 220, 255));
-		                           },
-		                           &s.tile, [] { if (s.refresh_all) s.refresh_all(); }, [] { int f, c; TileRange(&f, &c); return f; });
+		                           });
 		animated << tile_grid;
 		tile_layout->addWidget(Scroll(tile_grid, tile_page), 1);
 		auto *tile_side = new QVBoxLayout();
@@ -904,6 +1460,7 @@ void AddTabs(QTabWidget *tabs) {
 		tile_side->addWidget(strip);
 		tile_side->addLayout(flip_row);
 		tile_side->addWidget(Note("Left click paints with the colour picked below, right click picks the colour under the pointer.", tile_page));
+		{ auto *ops = new OpsRow(EDITOR_TERRAIN_TILE, &s.tile, tile_page); ops_rows << ops; tile_side->addWidget(ops); }
 		tile_side->addStretch();
 		tile_layout->addLayout(tile_side);
 		tabs->addTab(Page(tile_page), "Tiles");
@@ -916,10 +1473,13 @@ void AddTabs(QTabWidget *tabs) {
 		auto *block_page = new QWidget();
 		auto *block_layout = new QHBoxLayout(block_page);
 		auto *block_grid = new Grid(16, 16 * kBlockZoom + 1, [] { int f, c; BlockRange(&f, &c); return c; },
-		                            [](QPainter *p, int i, const QRect &at) {
+		                            [](TileSink &sink, int i, const QRect &at) {
 			                            priority_dim = s.block_night;
-			                            DrawBlock(p, i, at.adjusted(0, 0, -1, -1));
+			                            sink.Block(i, at.adjusted(0, 0, -1, -1));
 			                            priority_dim = false;
+		                            },
+		                            &s.block, [] { if (s.refresh_all) s.refresh_all(); }, [] { int f, c; BlockRange(&f, &c); return f; },
+		                            [](QPainter *p, int i, const QRect &at) {
 			                            if (HasSupplement() && i >= s.supp_block) // (a small mark on the supplement's blocks)
 				                            p->fillRect(QRect(at.x() + 1, at.y() + 1, 4, 4), QColor(0, 220, 255));
 			                            size_t bytes;
@@ -933,8 +1493,7 @@ void AddTabs(QTabWidget *tabs) {
 				                            p->setBrush(Qt::NoBrush);
 				                            p->drawRect(at.adjusted(1, 1, -2, -2));
 			                            }
-		                            },
-		                            &s.block, [] { if (s.refresh_all) s.refresh_all(); }, [] { int f, c; BlockRange(&f, &c); return f; });
+		                            });
 		animated << block_grid;
 		block_layout->addWidget(Scroll(block_grid, block_page), 1);
 		auto *block_side = new QVBoxLayout();
@@ -968,6 +1527,7 @@ void AddTabs(QTabWidget *tabs) {
 		QObject::connect(night, &QCheckBox::toggled, block_page, [](bool on) { s.block_night = on; if (s.refresh_all) s.refresh_all(); });
 		for (QWidget *widget : std::initializer_list<QWidget *>{ night, tile_spin, line_spin, x_flip, y_flip, priority, use_tile })
 			block_side->addWidget(widget);
+		{ auto *ops = new OpsRow(EDITOR_TERRAIN_BLOCK, &s.block, block_page); ops_rows << ops; block_side->addWidget(ops); }
 		block_side->addStretch();
 		block_layout->addLayout(block_side);
 		tabs->addTab(Page(block_page), "Blocks");
@@ -976,7 +1536,7 @@ void AddTabs(QTabWidget *tabs) {
 		auto *chunk_page = new QWidget();
 		auto *chunk_layout = new QHBoxLayout(chunk_page);
 		auto *chunk_grid = new Grid(4, kChunkThumb + 1, [] { return ChunkCount(); },
-		                            [](QPainter *p, int i, const QRect &at) { DrawChunk(p, i, QRect(at.x(), at.y(), kChunkThumb, kChunkThumb)); }, &s.chunk, [] { if (s.refresh_all) s.refresh_all(); });
+		                            [](TileSink &sink, int i, const QRect &at) { sink.Chunk(i, QRect(at.x(), at.y(), kChunkThumb, kChunkThumb)); }, &s.chunk, [] { if (s.refresh_all) s.refresh_all(); });
 		animated << chunk_grid;
 		chunk_layout->addWidget(Scroll(chunk_grid, chunk_page), 0);
 		auto *chunk_side = new QVBoxLayout();
@@ -999,6 +1559,7 @@ void AddTabs(QTabWidget *tabs) {
 		for (QCheckBox *box : { cx, cy, s1t, s1l, s2t, s2l })
 			chunk_side->addWidget(box);
 		chunk_side->addWidget(Note("Left click places the block selected in Blocks (with these flags), right click picks the block and flags under the pointer. The solids of the path shown are laid over the blocks: top solid is clear white, left and right solid yellow (with the bottom in red), all solid black.", chunk_page));
+		{ auto *ops = new OpsRow(EDITOR_TERRAIN_CHUNK, &s.chunk, chunk_page); ops_rows << ops; chunk_side->addWidget(ops); }
 		chunk_side->addStretch();
 		chunk_layout->addLayout(chunk_side, 1);
 		tabs->addTab(Page(chunk_page), "Chunks");
@@ -1013,6 +1574,10 @@ void AddTabs(QTabWidget *tabs) {
 		auto *solids = new SolidPane();
 		animated << solids;
 		tabs->addTab(Page(solids), "Solids");
+		import_pane = new ImportPane();
+		tabs->addTab(Page(import_pane), "Import");
+		overlay_pane = new OverlayPane();
+		tabs->addTab(Page(overlay_pane), "Overlay");
 
 		// The planes: the foreground (A) and the background (B), the same tool on the two halves of the layout
 		LayerCanvas *canvases[2];
@@ -1024,7 +1589,7 @@ void AddTabs(QTabWidget *tabs) {
 			box->addWidget(where);
 			chunk_picks[plane] = new QLabel(page);
 			auto *picker = new Grid(256, 68, [] { return ChunkCount(); },
-			                        [](QPainter *p, int i, const QRect &at) { p->drawImage(at.x(), at.y(), ChunkThumb(i, 64)); }, &s.chunk, [] { if (s.refresh_all) s.refresh_all(); });
+			                        [](TileSink &sink, int i, const QRect &at) { sink.Thumb(i, QRect(at.x(), at.y(), 64, 64), 0); }, &s.chunk, [] { if (s.refresh_all) s.refresh_all(); });
 			auto *picker_area = Scroll(picker, page);
 			picker_area->setFixedHeight(68 + 20);
 			box->addWidget(chunk_picks[plane]);
@@ -1144,12 +1709,17 @@ void AddTabs(QTabWidget *tabs) {
 			InvalidateThumbs();
 			for (QWidget *widget : animated)
 				if (widget->isVisible())
-					widget->update();
+					Redraw(widget);
 		});
 		timer->start(40);
 
 		s.refresh_all = [=] {
 			sync_supplement();
+			LoadOpsRows();
+			if (import_pane != nullptr)
+				import_pane->Refill();
+			if (overlay_pane != nullptr)
+				overlay_pane->Refill();
 			tile_grid->Resize();
 			block_grid->Resize();
 			chunk_grid->Resize();
@@ -1200,14 +1770,17 @@ void Refresh() {
 
 bool Save(const QString &slot, int zone, int act, QString *message) {
 	size_t bytes;
-	struct Item { int kind; QString suffix; const uint8_t *data; size_t size; };
+	struct Item { int kind; QString suffix; const uint8_t *data; size_t size; QString name; }; // (`name`: a file of its own name in the kind's folder, not the zone's)
 	QList<Item> items;
 	const uint8_t *art = Editor_Art(&bytes);
-	items << Item{ 0, "", art, bytes };
+	const bool overlay = !s.overlay_name.isEmpty() && s.supp_tile >= 0 && s.supp_block >= 0; // (an overlay of the editor's own: the part from its start is saved apart)
+	const size_t art_first = overlay ? size_t(s.supp_tile) * 32 : 0;
+	items << Item{ 0, "", art != nullptr && art_first <= bytes ? art + art_first : art, bytes - qMin(bytes, art_first), overlay ? s.overlay_name + "Secondary" : QString() };
 	const uint8_t *blocks = Editor_Blocks(&bytes);
-	items << Item{ 1, "", blocks, bytes };
+	const size_t block_first = overlay ? size_t(s.supp_block) * 8 : 0;
+	items << Item{ 1, "", blocks != nullptr && block_first <= bytes ? blocks + block_first : blocks, bytes - qMin(bytes, block_first), overlay ? s.overlay_name + "Secondary" : QString() };
 	const uint8_t *chunks = Editor_Chunks(&bytes);
-	items << Item{ 2, "", chunks, bytes };
+	items << Item{ 2, "", chunks, bytes, QString() };
 	// the level's solid index: both paths in one file, interleaved (the Sonic 3 & Knuckles layout: LevelSolids.h)
 	static uint8_t solids_file[0x800];
 	{
@@ -1217,10 +1790,10 @@ bool Save(const QString &slot, int zone, int act, QString *message) {
 		if (blocks > 0x400)
 			blocks = 0x400;
 		LevelSolids_Pack(p0, p1, blocks, solids_file); // (the arrays are 0x400 bytes each, zero beyond what a path holds)
-		items << Item{ 3, "", solids_file, blocks * 2 };
+		items << Item{ 3, "", solids_file, blocks * 2, QString() };
 	}
 	bool ok = true;
-	const char *code = Peek_ZoneCode(zone);
+	const char *code = Editor_HasTarget() ? Editor_TargetCode() : Peek_ZoneCode(zone); // (a Keymaker zone is named by its own code)
 	static const char *const fallback[5] = { "art", "blocks", "chunks", "solids", "palette" };
 	for (const Item &item : items) {
 		if (item.data == nullptr || item.size == 0)
@@ -1228,7 +1801,7 @@ bool Save(const QString &slot, int zone, int act, QString *message) {
 		size_t packed_size;
 		uint8_t *packed = KosEnc(item.data, item.size, &packed_size);
 		const char *folder = Peek_TerrainFolder(item.kind);
-		const QString path = folder && code ? QString("%1/%2/%3%4").arg(slot, folder, code, item.suffix) : QString("%1/%2%3.kos").arg(slot, fallback[item.kind], item.suffix);
+		const QString path = folder && code ? QString("%1/%2/%3%4").arg(slot, folder, item.name.isEmpty() ? QString(code) : item.name, item.name.isEmpty() ? item.suffix : QString()) : QString("%1/%2%3.kos").arg(slot, fallback[item.kind], item.name.isEmpty() ? item.suffix : "_" + item.name);
 		QDir().mkpath(QFileInfo(path).absolutePath());
 		QFile file(path);
 		ok = ok && packed != nullptr && file.open(QIODevice::WriteOnly) && file.write(reinterpret_cast<const char *>(packed), qint64(packed_size)) == qint64(packed_size);
@@ -1238,7 +1811,8 @@ bool Save(const QString &slot, int zone, int act, QString *message) {
 	{
 		const uint8_t *layout = Editor_Layout(&bytes);
 		const char *folder = Peek_LevelLayoutFolder();
-		const char *name = Peek_LevelName(zone, act);
+		QByteArray keymaker_level = QString("%1%2").arg(Editor_TargetCode()).arg(act + 1).toLatin1();
+		const char *name = Editor_HasTarget() ? keymaker_level.constData() : Peek_LevelName(zone, act);
 		size_t file_size, packed_size;
 		uint8_t *file_data = LevelLayout_Pack(layout, int(bytes / 0x100), &file_size, nullptr); // (the Sonic 3 & Knuckles layout format, then Kosinski: LevelLayout.h)
 		uint8_t *packed = KosEnc(file_data, file_size, &packed_size);
