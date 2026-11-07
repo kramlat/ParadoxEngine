@@ -186,6 +186,9 @@ static void AnimateScript(Sst *obj, const uint8_t *table, bool frame_flips) {
     case 0xFA: // the second routine counter on by 2 (Sonic 2's: the script that ends in it stays on it until the object changes the animation)
         obj->routine_secondary = (uint8_t)(obj->routine_secondary + 2);
         break;
+    case 0xF9: // the object's own state byte (Obj_Timer, its first byte at $2A) on by 2 (the pre-beta's: Neo Green Hill's pillars use it)
+        obj->own.u8[2] = (uint8_t)(obj->own.u8[2] + 2);
+        break;
     case 0xFC: // the routine counter on by 2
         obj->routine = (uint8_t)(obj->routine + 2);
         obj->anim_frame_timer = 0;
