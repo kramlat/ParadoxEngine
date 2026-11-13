@@ -167,8 +167,8 @@ static void WhiteIn_DecColour(uint16_t* col, uint16_t ref) {
         v -= 0x200;
     else if ((v - 0x020) >= ref)
         v -= 0x020;
-    else if ((v - 0x002) >= ref)
-        v -= 0x002;
+    else
+        v -= 0x002; // (Pal_DecRed_2 takes the red down without comparing it with the target: a colour with an odd or out of range red or blue, like the special stage's $0F00, ends up where the 22 frames of the fade leave it, $0EC2)
     *col = v;
 }
 

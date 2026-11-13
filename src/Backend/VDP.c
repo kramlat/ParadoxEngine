@@ -30,6 +30,7 @@ void Audio_Update(void);
 #define VDP_MASK_SPRITE   (1 << 1)
 #define VDP_MASK_SH_SHADOW    (1 << 2) // (shadow/highlight mode) a sprite's shadow operator (palette line 3, colour 15) is here
 #define VDP_MASK_SH_HIGHLIGHT (1 << 3) // ... its highlight operator (colour 14)
+#define VDP_MASK_SH_NORMAL    (1 << 4) // (shadow/highlight mode) a plane tile with its priority bit set is here, drawn or not: where it is clear the pixel is not shadowed (the pre-beta special stage shadows only what its sprites say: every tile of its track has the bit)
 
 //VDP internal state
 // The tile space: patterns only (a game may keep a plane in it: Plane_UseTiles). The planes, scroll tables, vertical scroll and sprite tables are the viewports' own (Viewport.h).
@@ -364,7 +365,8 @@ static inline uint8_t *VDP_GetPatternAddress(size_t pattern) {
 	uint8_t v = (*from >> nibs) & 0xF;                    \
 	if (v != 0) {                                         \
 		if (vdp_sh_sprites && (pal) == 3 && v >= 14) {    \
-			*tom |= (v == 14) ? VDP_MASK_SH_HIGHLIGHT : VDP_MASK_SH_SHADOW; \
+			if (!(*tom & and))                            \
+				*tom |= (v == 14) ? VDP_MASK_SH_HIGHLIGHT : VDP_MASK_SH_SHADOW; \
 			to++;                                         \
 		} else if (*tom & and) {                          \
 			*tom |= or;                                   \
@@ -375,7 +377,9 @@ static inline uint8_t *VDP_GetPatternAddress(size_t pattern) {
 		}                                                 \
 		tom++;                                            \
 	} else {                                              \
-		to++;                                             \
+		to++;                                         \
+		if ((or) & VDP_MASK_PLANEPRI)                 \
+			*tom |= VDP_MASK_SH_NORMAL;                \
 		tom++;                                            \
 	}                                                     \
 }
@@ -644,7 +648,7 @@ static inline void VDP_DrawDebugText(uint32_t *to, const char *text, size_t x, s
 static inline void VDP_ApplyShadowHighlight(uint32_t *to, const uint8_t *tom, int w) {
 	for (int i = 0; i < w; i++) {
 		uint8_t m = tom[i];
-		int state = (m & (VDP_MASK_PLANEPRI | VDP_MASK_SPRITE)) ? 1 : 0; // 0 shadow, 1 normal, 2 highlight
+		int state = (m & (VDP_MASK_PLANEPRI | VDP_MASK_SPRITE | VDP_MASK_SH_NORMAL)) ? 1 : 0; // 0 shadow, 1 normal, 2 highlight
 		if (m & VDP_MASK_SH_HIGHLIGHT)
 			state++;
 		if (m & VDP_MASK_SH_SHADOW)

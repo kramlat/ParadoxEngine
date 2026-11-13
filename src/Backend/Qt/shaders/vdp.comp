@@ -12,7 +12,7 @@ layout(std140, binding = 2) uniform Afterglow {
     int pad0, pad1;
 };
 
-const uint MASK_PLANEPRI = 1u, MASK_SPRITE = 2u, MASK_SH_SHADOW = 4u, MASK_SH_HIGHLIGHT = 8u;
+const uint MASK_PLANEPRI = 1u, MASK_SPRITE = 2u, MASK_SH_SHADOW = 4u, MASK_SH_HIGHLIGHT = 8u, MASK_SH_NORMAL = 16u; // (MASK_SH_NORMAL: a priority tile is here, drawn or not: not shadowed)
 // the header's words
 const uint H_WIDTH = 0u, H_ROWS = 1u, H_MODE = 2u, H_H = 3u, H_MAIN_TILES = 4u, H_LINES = 5u, H_PW0 = 6u, H_PH0 = 7u, H_PW1 = 8u, H_PH1 = 9u, H_W1 = 10u;
 // a line's record
@@ -57,6 +57,8 @@ uint ViewPixel(uint view, uint line, int c, int view_w) {
         if ((mask & MASK_PLANEPRI) == 0u)
             colour = w[pal + ((attr >> 3) & 3u) * 16u + v];
         mask |= attr & 1u;
+    } else if ((attr & 1u) != 0u) {
+        mask |= MASK_SH_NORMAL;
     }
     // plane A, or the window where it is
     uint win = w[r + L_WINDOW];
@@ -68,6 +70,8 @@ uint ViewPixel(uint view, uint line, int c, int view_w) {
         if ((mask & MASK_PLANEPRI) == 0u)
             colour = w[pal + ((attr >> 3) & 3u) * 16u + v];
         mask |= attr & 1u;
+    } else if ((attr & 1u) != 0u) {
+        mask |= MASK_SH_NORMAL;
     }
 
     // the sprites, the first on the line over the rest
@@ -104,7 +108,8 @@ uint ViewPixel(uint view, uint line, int c, int view_w) {
         uint line_pal = (sattr >> 3) & 3u;
         uint and_mask = (sattr & 1u) != 0u ? MASK_SPRITE : (MASK_PLANEPRI | MASK_SPRITE);
         if (sh && line_pal == 3u && v >= 14u) {
-            mask |= v == 14u ? MASK_SH_HIGHLIGHT : MASK_SH_SHADOW;
+            if ((mask & and_mask) == 0u) // (an operator is a sprite pixel for the order and the priority: under an earlier sprite or a priority tile it does nothing)
+                mask |= v == 14u ? MASK_SH_HIGHLIGHT : MASK_SH_SHADOW;
         } else {
             if ((mask & and_mask) == 0u)
                 colour = w[pal + line_pal * 16u + v];
@@ -114,7 +119,7 @@ uint ViewPixel(uint view, uint line, int c, int view_w) {
 
     // shadow/highlight
     if (sh) {
-        int state = (mask & (MASK_PLANEPRI | MASK_SPRITE)) != 0u ? 1 : 0;
+        int state = (mask & (MASK_PLANEPRI | MASK_SPRITE | MASK_SH_NORMAL)) != 0u ? 1 : 0;
         if ((mask & MASK_SH_HIGHLIGHT) != 0u)
             state++;
         if ((mask & MASK_SH_SHADOW) != 0u)
