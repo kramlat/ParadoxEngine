@@ -39,7 +39,7 @@ if(TRUE)
   # The window: a QMainWindow (menu bar) with the game frame drawn as a texture through Qt's RHI
   # (Vulkan, else OpenGL) or by the CPU; see engine/Backend/Qt/QtHost.h and PictureView.h.
   set(QT_NO_PRIVATE_MODULE_WARNING ON) # (GuiPrivate is for QRhi only, which Qt calls semi-public: its API may change between minor versions)
-  find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGLWidgets Multimedia ShaderTools GuiPrivate)
+  find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGLWidgets Multimedia ShaderTools GuiPrivate Network WebSockets)
   find_package(yaml-cpp REQUIRED) # the settings file (engine/Backend/Qt/Settings.cpp)
   target_sources(ParadoxEngine PRIVATE "${PM_DIR}/src/Backend/Qt/QtHost.cpp" "${PM_DIR}/src/Backend/Qt/QtHost.h"
                                 "${PM_DIR}/src/Backend/Qt/ConsoleDrawer.cpp" "${PM_DIR}/src/Backend/Qt/ConsoleDrawer.h"
@@ -54,8 +54,9 @@ if(TRUE)
                                 "${PM_DIR}/src/Backend/Qt/PictureView.cpp" "${PM_DIR}/src/Backend/Qt/PictureView.h"
                                 "${PM_DIR}/src/Backend/Qt/GpuVdp.cpp" "${PM_DIR}/src/Backend/Qt/GpuVdp.h"
                                 "${PM_DIR}/src/Backend/Qt/TileGpu.cpp" "${PM_DIR}/src/Backend/Qt/TileGpu.h"
-                                "${PM_DIR}/src/Backend/Qt/ControlsDialog.cpp" "${PM_DIR}/src/Backend/Qt/ControlsDialog.h")
-  target_link_libraries(ParadoxEngine PUBLIC Qt6::Widgets Qt6::OpenGLWidgets Qt6::Multimedia yaml-cpp::yaml-cpp)
+                                "${PM_DIR}/src/Backend/Qt/ControlsDialog.cpp" "${PM_DIR}/src/Backend/Qt/ControlsDialog.h"
+                                "${PM_DIR}/src/Backend/Qt/NetPlay.cpp" "${PM_DIR}/src/Backend/NetPlay.h")
+  target_link_libraries(ParadoxEngine PUBLIC Qt6::Widgets Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::WebSockets yaml-cpp::yaml-cpp)
   target_link_libraries(ParadoxEngine PRIVATE Qt6::GuiPrivate) # (QRhi: <rhi/qrhi.h>, semi-public since Qt 6.6)
   # The picture through the GPU (PictureView.cpp: Qt's RHI, Vulkan first): its shaders, baked for every RHI backend by qsb into the library's resources
   qt_add_shaders(ParadoxEngine "paradox_shaders" PREFIX "/paradox/shaders" BASE "${PM_DIR}/src/Backend/Qt/shaders"
