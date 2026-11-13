@@ -6,6 +6,7 @@
 
 // Each plane's name table and each view's scroll table is an array of its own: nothing written in one can reach another
 #define PLANE_ENTRIES 0x1000 // 64 x 64
+#define SCRATCH_PLANE_ENTRIES 0x4000 // the most a plane in the scratch memory can be (256 cells across by 64 down, or 512 by 32: the special stage's wide track)
 static tile_entry_t nametable_fg[PLANE_ENTRIES];
 static tile_entry_t nametable_bg[PLANE_ENTRIES];
 static tile_entry_t nametable_fg_p2[PLANE_ENTRIES];
@@ -72,7 +73,7 @@ void Plane_UseScratchAt(plane_t *plane, size_t byte_address) {
 	const size_t first = byte_address / 2;
 	const size_t total = sizeof(scratch_planes) / sizeof(scratch_planes[0]);
 	plane->entries = scratch_planes + (first < total ? first : total);
-	plane->count = first < total ? (total - first < PLANE_ENTRIES ? total - first : PLANE_ENTRIES) : 0;
+	plane->count = first < total ? (total - first < SCRATCH_PLANE_ENTRIES ? total - first : SCRATCH_PLANE_ENTRIES) : 0;
 	plane->bank = TileBank_Main();
 }
 
