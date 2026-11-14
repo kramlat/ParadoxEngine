@@ -120,8 +120,12 @@ void SstRenderQueue(int queue, sprite_t **sprite, uint8_t *sprite_i, const Sprit
 	const SpriteLayer *layer = &view->layer[1];
 	const int16_t cam_x = layer->x ? *layer->x : 0, cam_y = layer->y ? *layer->y : 0;
 	const int16_t y_base = (int16_t)(top - SPRITE_TOP_1P);
-	for (int j = 0; j < Sst_QueueCount(queue); j++) {
-		Sst *obj = Sst_QueueEntry(queue, j);
+	const uint8_t front_bit = view == &sprite_view_p2 ? 2 : 1;
+	for (int j = 0; j < 2 * Sst_QueueCount(queue); j++) {
+		// Two passes over the queue: the objects that are in front in this view first (the VDP puts what is first in its table on top), then the others
+		Sst *obj = Sst_QueueEntry(queue, j % Sst_QueueCount(queue));
+		if (((obj->front_in_view & front_bit) != 0) != (j < Sst_QueueCount(queue)))
+			continue;
 		if (clear_on_screen)
 			obj->render_flags &= 0x7F;
 		if (obj->mappings == NULL)
