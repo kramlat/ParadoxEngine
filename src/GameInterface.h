@@ -48,6 +48,7 @@ typedef struct {
     const GameCredit *credits; ///< and its credits, likewise
     const char *settings_file; ///< the settings file's name in the user's data directory ("Sonic1Settings.cfg"): the game's own, so games do not share one
     const char *settings_title; ///< the comment on the settings file's first line ("Sonic 1 PC settings")
+    bool demo_death_to_sega; ///< a death in an attract mode demo ends it (the Sega screen follows) instead of loading the demo again
     bool no_title_card; ///< a level starts without its title card (the prototypes had none)
     bool title_card_own_art; ///< the title card object loads its own art (Sonic 2's pre-beta card): the level does not queue the title card's pattern load cue
     bool split_screen; ///< the game has a two-player split screen (Sonic 2 and later): the demo recorder offers it
