@@ -12,6 +12,9 @@
 #include <QHostAddress>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QNetworkDatagram>
+#include <QNetworkInterface>
+#include <QUdpSocket>
 #include <QPointer>
 #include <QMessageAuthenticationCode>
 #include <QPasswordDigestor>
@@ -57,6 +60,15 @@ struct NetPlay {
     QElapsedTimer blocked;
     bool is_blocked = false;
 
+    uint16_t discovery_port = NETPLAY_DISCOVERY_PORT;
+    QUdpSocket *announce_socket = nullptr; // host: sends the announcements
+    QTimer *announce_timer = nullptr;
+    QUdpSocket *search_socket = nullptr;   // guest: hears them
+    QByteArray search_tag;
+    bool found = false;                    // the guest has heard its host: NetPlay_Poll joins it (not inside the socket's own signal)
+    QString found_host;
+    uint16_t found_port = 0;
+
     uint32_t send_seq = 0, recv_seq = 0;
     uint32_t frame = 0;
     uint32_t sent_through = 0; // frames up to this one (not including) have had their local input sent
@@ -90,14 +102,19 @@ QByteArray Normalize(const std::string &password) {
 }
 
 std::string MakePassword() {
-    static const char alphabet[] = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // (32 letters: no 0, 1, I or O to mistake)
+    static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"; // (36 symbols, the 8 by 5 grid of the code screen: the user's codes have O and 0 both)
     std::string out;
     for (int i = 0; i < 20; i++) {
-        if (i > 0 && i % 4 == 0)
+        if (i > 0 && i % 5 == 0)
             out += '-';
-        out += alphabet[QRandomGenerator::system()->bounded(32)];
+        out += alphabet[QRandomGenerator::system()->bounded(36)];
     }
     return out;
+}
+
+// The tag of a session code in the announcements: 8 bytes of a hash of the game and the code, in hex (the code is 100 bits: this does not give it away)
+QByteArray SessionTag(const std::string &game, const std::string &code) {
+    return QCryptographicHash::hash(QByteArray("paradox-netplay-announce|") + QByteArray::fromStdString(game) + '|' + Normalize(code), QCryptographicHash::Sha256).left(8).toHex();
 }
 
 QByteArray Random16() {
@@ -379,8 +396,36 @@ void Close(NetPlay *n, const std::string &reason, bool tell, const char *bye) {
         n->server->close();
 }
 
+// One announcement: the WebSocket port and the session code's tag, to the local network's broadcast addresses (and this machine's own loopback: two copies of the game on one machine find each other too)
+void AnnounceNow(NetPlay *n) {
+    if (n->announce_socket == nullptr || n->server == nullptr || n->status != NETPLAY_LISTENING) {
+        if (n->announce_timer != nullptr)
+            n->announce_timer->stop();
+        return;
+    }
+    const QByteArray message = QJsonDocument(QJsonObject{ { "p", "paradox-netplay" }, { "tag", QString::fromLatin1(SessionTag(n->game, n->password)) }, { "port", (int)n->server->serverPort() } }).toJson(QJsonDocument::Compact);
+    n->announce_socket->writeDatagram(message, QHostAddress(QHostAddress::Broadcast), n->discovery_port);
+    n->announce_socket->writeDatagram(message, QHostAddress(QHostAddress::LocalHost), n->discovery_port);
+    for (const QNetworkInterface &iface : QNetworkInterface::allInterfaces()) {
+        if (!(iface.flags() & QNetworkInterface::IsUp) || (iface.flags() & QNetworkInterface::IsLoopBack))
+            continue;
+        for (const QNetworkAddressEntry &entry : iface.addressEntries()) {
+            if (entry.ip().protocol() == QAbstractSocket::IPv4Protocol && !entry.broadcast().isNull())
+                n->announce_socket->writeDatagram(message, entry.broadcast(), n->discovery_port);
+        }
+    }
+}
+
 void Reset(NetPlay *n) {
     Detach(n);
+    delete n->announce_timer;
+    n->announce_timer = nullptr;
+    delete n->announce_socket;
+    n->announce_socket = nullptr;
+    delete n->search_socket;
+    n->search_socket = nullptr;
+    n->found = false;
+    n->search_tag.clear();
     if (n->socket != nullptr) { // (a host's socket belongs to its server: it goes first, and the server must not find it gone)
         n->socket->disconnect();
         n->socket->abort();
@@ -459,8 +504,52 @@ bool NetPlay_Host(NetPlay *n, const char *game, const char *bind_address, uint16
         n->status = NETPLAY_CLOSED;
         return false;
     }
+    n->announce_socket = new QUdpSocket();
+    n->announce_timer = new QTimer();
+    QObject::connect(n->announce_timer, &QTimer::timeout, [n]() { AnnounceNow(n); });
     n->status = NETPLAY_LISTENING;
+    AnnounceNow(n);
+    n->announce_timer->start(500);
     return true;
+}
+
+bool NetPlay_JoinByCode(NetPlay *n, const char *game, const char *code) {
+    EnsureApplication();
+    const uint16_t discovery = n->discovery_port;
+    Reset(n);
+    n->discovery_port = discovery;
+    n->host = false;
+    n->game = game != nullptr ? game : "";
+    n->password = code != nullptr ? code : "";
+    n->search_tag = SessionTag(n->game, n->password);
+    n->search_socket = new QUdpSocket();
+    if (!n->search_socket->bind(QHostAddress(QHostAddress::AnyIPv4), n->discovery_port, QAbstractSocket::ShareAddress | QAbstractSocket::ReuseAddressHint)) {
+        n->reason = n->search_socket->errorString().toStdString();
+        n->status = NETPLAY_CLOSED;
+        return false;
+    }
+    QObject::connect(n->search_socket, &QUdpSocket::readyRead, [n]() {
+        while (n->search_socket != nullptr && n->search_socket->hasPendingDatagrams()) {
+            const QNetworkDatagram datagram = n->search_socket->receiveDatagram();
+            const QJsonObject message = QJsonDocument::fromJson(datagram.data()).object();
+            if (message.value("p").toString() != "paradox-netplay" || message.value("tag").toString().toLatin1() != n->search_tag || n->found)
+                continue;
+            const int port = message.value("port").toInt();
+            bool ok = false;
+            const quint32 v4 = datagram.senderAddress().toIPv4Address(&ok);
+            if (!ok || port <= 0 || port > 65535)
+                continue;
+            n->found_host = QHostAddress(v4).toString();
+            n->found_port = (uint16_t)port;
+            n->found = true;
+        }
+    });
+    n->status = NETPLAY_SEARCHING;
+    return true;
+}
+
+void NetPlay_SetDiscoveryPort(NetPlay *n, uint16_t port) {
+    n->discovery_port = port != 0 ? port : NETPLAY_DISCOVERY_PORT;
 }
 
 bool NetPlay_Join(NetPlay *n, const char *game, const char *host, uint16_t port, const char *password) {
@@ -497,9 +586,14 @@ void NetPlay_Stop(NetPlay *n) {
 }
 
 void NetPlay_Poll(NetPlay *n) {
-    (void)n;
     if (QCoreApplication::instance() != nullptr)
         QCoreApplication::processEvents(QEventLoop::AllEvents, 0);
+    if (n->status == NETPLAY_SEARCHING && n->found) { // (the host has been heard: join it, outside the socket's signal)
+        const std::string game = n->game, code = n->password, host = n->found_host.toStdString();
+        const uint16_t port = n->found_port, discovery = n->discovery_port;
+        NetPlay_Join(n, game.c_str(), host.c_str(), port, code.c_str());
+        n->discovery_port = discovery;
+    }
 }
 
 NetPlayStatus NetPlay_Status(const NetPlay *n) { return n->status; }

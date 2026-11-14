@@ -28,6 +28,7 @@ typedef struct NetPlay NetPlay;
 typedef enum {
     NETPLAY_IDLE,       // nothing started
     NETPLAY_LISTENING,  // host: waiting for the guest
+    NETPLAY_SEARCHING,  // guest: looking for the host on the network by the session code (NetPlay_JoinByCode)
     NETPLAY_CONNECTING, // guest: connecting and proving it knows the password
     NETPLAY_READY,      // the other side is there and proved itself; the host has not started the match
     NETPLAY_RUNNING,    // the match is on (lockstep)
@@ -38,11 +39,20 @@ NetPlay *NetPlay_Create(void);
 void NetPlay_Destroy(NetPlay *n); // (ends the session too)
 
 // Host: listens on `bind_address` (NULL: every address) and `port` (0: any free one, see NetPlay_Port). `game` names the game and its version: both sides must give the same. `password` NULL makes a random one
-// (NetPlay_Password; 20 letters and digits in groups of 4); the letters' case and the dashes and spaces do not matter. `input_delay` is how many frames the pads are held back so that the other side's has
+// (NetPlay_Password; 20 letters and digits in groups of 5, 36 symbols: about 103 bits); the letters' case and the dashes and spaces do not matter. `input_delay` is how many frames the pads are held back so that the other side's has
 // time to arrive (0 to 15; 4 is about a fifteenth of a second at 60 frames a second).
 bool NetPlay_Host(NetPlay *n, const char *game, const char *bind_address, uint16_t port, const char *password, int input_delay);
 // Guest: connects to the host and proves the password (the answer comes while polling: NETPLAY_READY or NETPLAY_CLOSED with the reason)
 bool NetPlay_Join(NetPlay *n, const char *game, const char *host, uint16_t port, const char *password);
+// Finding the host without its address (the way a game with a session code does it): while a host listens it announces itself on the local network, every half second, to UDP port `NETPLAY_DISCOVERY_PORT`. The
+// announcement carries the WebSocket port and a *tag* of the session code (8 bytes of a hash of the game and the code: the code itself never goes out), so only someone who knows the code can tell which host is
+// theirs. The guest types the code and calls NetPlay_JoinByCode: it listens for an announcement with its tag (status NETPLAY_SEARCHING), then joins the address the announcement came from, with the code as
+// the password: the same handshake as NetPlay_Join. It searches until NetPlay_Stop. (A host on another network, past a router, is not found: it is for the local network.)
+#define NETPLAY_DISCOVERY_PORT 47831
+bool NetPlay_JoinByCode(NetPlay *n, const char *game, const char *code);
+// The UDP port for the announcements (0: NETPLAY_DISCOVERY_PORT): call before NetPlay_Host and NetPlay_JoinByCode (the tests use their own)
+void NetPlay_SetDiscoveryPort(NetPlay *n, uint16_t port);
+
 // Ends the session (the other side is told)
 void NetPlay_Stop(NetPlay *n);
 
