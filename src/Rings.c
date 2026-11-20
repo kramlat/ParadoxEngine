@@ -134,7 +134,7 @@ void Rings_Render(sprite_t **sprite, uint8_t *sprite_i, const SpriteView *view, 
             continue; // gone
 
         // Inside the view's height (with the level's wrap), the ring's centre
-        uint16_t y = (uint16_t)((RingY(i) - cam_y + 8) & level_screen_y_wrap);
+        uint16_t y = (uint16_t)((RingY(i) - cam_y + 8) & LEVEL_SPRITE_Y_WRAP);
         if (y >= SCREEN_HEIGHT + 0x10)
             continue;
         y = (uint16_t)(y + 0x78);

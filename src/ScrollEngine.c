@@ -10,6 +10,7 @@ static bool zone_set[SCROLL_MAX_ZONES][SCROLL_MAX_ACTS];
 
 unsigned level_layout_col_mask = 0x7F, level_layout_row_mask = 0xF;
 uint16_t level_camera_y_mask = 0x7F0, level_screen_y_wrap = 0x7FF;
+bool level_sprites_wrap_y = true;
 
 void ScrollEngine_SetLevelMasks(unsigned col_mask, unsigned row_mask) {
     level_layout_col_mask = col_mask;

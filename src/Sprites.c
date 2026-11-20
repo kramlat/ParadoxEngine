@@ -144,7 +144,7 @@ void SstRenderQueue(int queue, sprite_t **sprite, uint8_t *sprite_i, const Sprit
 				if (x + w < 0 || x - w >= view_w)
 					continue;
 				x = (int16_t)(x + 128);
-				y = (int16_t)((y - cam_y + h) & level_screen_y_wrap);
+				y = (int16_t)((y - cam_y + h) & LEVEL_SPRITE_Y_WRAP);
 				if ((uint16_t)y >= (uint16_t)(2 * h + SCREEN_HEIGHT + SCREEN_TALLADD))
 					continue;
 				y = (int16_t)(y + 128 - h);
@@ -171,7 +171,7 @@ void SstRenderQueue(int queue, sprite_t **sprite, uint8_t *sprite_i, const Sprit
 				int16_t cx = obj->children[c].x, cy = obj->children[c].y;
 				if (level) {
 					cx = (int16_t)(cx - cam_x + 128);
-					cy = (int16_t)((cy - cam_y + 128) & level_screen_y_wrap);
+					cy = (int16_t)((cy - cam_y + 128) & LEVEL_SPRITE_Y_WRAP);
 				}
 				const uint8_t *pieces;
 				uint16_t count = Mappings_FramePieces(obj->mappings, obj->children[c].frame, &pieces);
@@ -186,7 +186,7 @@ void SstRenderQueue(int queue, sprite_t **sprite, uint8_t *sprite_i, const Sprit
 			if (x + w < 0 || x - w >= view_w)
 				continue;
 			x = (int16_t)(x + 128);
-			y = (int16_t)((y - cam_y + h) & level_screen_y_wrap);
+			y = (int16_t)((y - cam_y + h) & LEVEL_SPRITE_Y_WRAP);
 			if ((uint16_t)y >= (uint16_t)(2 * h + SCREEN_HEIGHT + SCREEN_TALLADD))
 				continue;
 			y = (int16_t)(y + 128 - h);
