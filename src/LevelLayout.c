@@ -151,10 +151,10 @@ bool LevelLayout_Load(const uint8_t *file, size_t file_size) {
         for (int row = 0; row < plane->rows; row++)
             memcpy(plane->data + (size_t)row * plane->width, scratch + row * 0x100 + plane_i * 0x80, plane->width);
     }
-    // a layout of more than 16 rows wraps by its own masks (the default masks are 16 rows: a level that is as tall as that or less keeps them)
-    if (level_layout_size.fg_rows > LEVEL_LAYOUT_ROWS || level_layout_size.bg_rows > LEVEL_LAYOUT_ROWS) {
-        LevelLayoutSize wrap = level_layout_size; // (the width keeps its 128: only the rows are what this is for)
-        wrap.fg_width = wrap.bg_width = LEVEL_LAYOUT_COLS;
+    // the height words of the layout file (the Sonic 3 & Knuckles format: the rows of each plane): a level of more than 16 rows wraps by its own masks, the next power of two that holds the height (16 rows or fewer keeps the default masks)
+    const unsigned height = level_layout_size.fg_rows > level_layout_size.bg_rows ? level_layout_size.fg_rows : level_layout_size.bg_rows;
+    if (height > LEVEL_LAYOUT_ROWS) {
+        LevelLayoutSize wrap = { LEVEL_LAYOUT_COLS, LEVEL_LAYOUT_COLS, (uint16_t)height, (uint16_t)height }; // (the width keeps its 128: only the rows are what this is for)
         ScrollEngine_SetLevelMasksForLayout(&wrap, false);
     } else {
         ScrollEngine_ResetLevelMasks();
