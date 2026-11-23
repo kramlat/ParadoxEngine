@@ -34,6 +34,7 @@ void ScrollEngine_Events(int zone, int act); ///< every frame: its screen event,
 /// How a level's layout wraps (S3&K sets these per level in LevelSetup: Layout_row_index_mask, Camera_Y_pos_mask, Screen_Y_wrap_value): chunks across and rows down, as masks, and
 /// the camera's Y in pixels. The defaults are the engine's old fixed ones (128 across, 16 down: $7F, $F, $7F0, $7FF); a level can set its own.
 extern unsigned level_layout_col_mask, level_layout_row_mask;
+extern bool level_layout_loops; ///< the level wraps vertically (its top limit is $FF00): a game sets it when its level sizes load, before the layout does; such a level goes round a drum of 16 rows
 extern uint16_t level_camera_y_mask, level_screen_y_wrap;
 /// Whether the sprites of level objects wrap at level_screen_y_wrap (the Sonic 3 & Knuckles way, Screen_Y_wrap_value). Sonic 1 and Sonic 2 only wrap where the level loops vertically: elsewhere an object
 /// that is far below the level (a badnik placed out of bounds that falls for ever, as some do in the originals) is not drawn, as on the Mega Drive. True unless a game says otherwise.

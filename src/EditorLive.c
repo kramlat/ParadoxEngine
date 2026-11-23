@@ -238,12 +238,8 @@ void Editor_SetLayoutRows(int rows) {
     if (rows == editor_rows)
         return;
     editor_rows = rows;
-    if (rows > LEVEL_LAYOUT_ROWS) { // (the level wraps at the next power of two that holds its rows: 32 for 17 to 32)
-        LevelLayoutSize wrap = { LEVEL_LAYOUT_COLS, LEVEL_LAYOUT_COLS, (uint16_t)rows, (uint16_t)rows };
-        ScrollEngine_SetLevelMasksForLayout(&wrap, false);
-    } else {
-        ScrollEngine_ResetLevelMasks();
-    }
+    LevelLayoutSize wrap = { LEVEL_LAYOUT_COLS, LEVEL_LAYOUT_COLS, LEVEL_LAYOUT_MAX_ROWS, LEVEL_LAYOUT_MAX_ROWS }; // (a level wraps at 32 rows, never before: LevelLayout_Load)
+    ScrollEngine_SetLevelMasksForLayout(&wrap, level_layout_loops);
 }
 const uint8_t *Editor_HeightMap(void) { return Collision_HeightMap; }
 const uint8_t *Editor_CurveAngles(void) { return Collision_Angle; }
