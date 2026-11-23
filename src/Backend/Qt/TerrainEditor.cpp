@@ -137,7 +137,18 @@ void ItemRange(int total, int start, int *first, int *count) {
 }
 void TileRange(int *first, int *count) { ItemRange(TileCount(), s.supp_tile, first, count); }
 void BlockRange(int *first, int *count) { ItemRange(BlockCount(), s.supp_block, first, count); }
-bool TileEditable(int tile) { int f, c; TileRange(&f, &c); return tile >= f && tile < f + c; }
+// The tiles that the level's animated art writes over (the game's list): shown in the tile grid, never edited (they are written over every few frames)
+int AnimatedTiles(int *first, int *count, const char **label, int max) { return Game_EditorAnimatedTiles(first, count, label, max); }
+const char *AnimatedTileName(int tile) {
+	int first[16], count[16];
+	const char *label[16];
+	const int n = AnimatedTiles(first, count, label, 16);
+	for (int i = 0; i < n; i++)
+		if (tile >= first[i] && tile < first[i] + count[i])
+			return label[i];
+	return nullptr;
+}
+bool TileEditable(int tile) { int f, c; TileRange(&f, &c); return tile >= f && tile < f + c && AnimatedTileName(tile) == nullptr; }
 bool BlockEditable(int block) { int f, c; BlockRange(&f, &c); return block >= f && block < f + c; }
 // "supplement +12", "base": where an item is, for the labels
 QString SupplementNote(int i, int start) {
@@ -1422,12 +1433,14 @@ void AddTabs(QTabWidget *tabs) {
 		// Tiles
 		auto *tile_page = new QWidget();
 		auto *tile_layout = new QHBoxLayout(tile_page);
-		auto *tile_grid = new Grid(16, 8 * kTileZoom + 1, [] { int f, c; TileRange(&f, &c); return c; },
+		auto *tile_grid = new Grid(16, 8 * kTileZoom + 1, [] { int f, c; TileRange(&f, &c); return qMax(c, 0x400 - f); }, // (the whole tile space the level can use: past the art it shows what the animations have taken and what is free)
 		                           [](TileSink &sink, int i, const QRect &at) { sink.Tile(i, s.palette_line, at.adjusted(0, 0, -1, -1)); },
 		                           &s.tile, [] { if (s.refresh_all) s.refresh_all(); }, [] { int f, c; TileRange(&f, &c); return f; },
 		                           [](QPainter *p, int i, const QRect &at) {
 			                           if (HasSupplement() && i >= s.supp_tile) // (a small mark on the supplement's tiles)
 				                           p->fillRect(QRect(at.x() + 1, at.y() + 1, 4, 4), QColor(0, 220, 255));
+			                           if (AnimatedTileName(i) != nullptr) // (what the level's animated art writes over: an orange mark; it is not edited)
+				                           p->fillRect(QRect(at.right() - 5, at.y() + 1, 4, 4), QColor(255, 140, 0));
 		                           });
 		animated << tile_grid;
 		tile_layout->addWidget(Scroll(tile_grid, tile_page), 1);
@@ -1734,7 +1747,9 @@ void AddTabs(QTabWidget *tabs) {
 				canvases[plane]->update();
 				chunk_picks[plane]->setText("Painting with chunk " + IndexText(s.chunk, ChunkCount()));
 			}
-			tile_label->setText("Tile " + IndexText(s.tile, TileCount()) + SupplementNote(s.tile, s.supp_tile));
+			const char *animated_name = AnimatedTileName(s.tile);
+			tile_label->setText("Tile " + IndexText(s.tile, TileCount()) + SupplementNote(s.tile, s.supp_tile) +
+			                    (animated_name != nullptr ? QString("  [animated: %1, not edited]").arg(animated_name) : s.tile >= TileCount() ? QString("  [past the art: free unless an animation takes it]") : QString()));
 			block_label->setText(QString("Block %1, tile %2 of 4").arg(IndexText(s.block, BlockCount())).arg(s.block_cell + 1) + SupplementNote(s.block, s.supp_block));
 			chunk_label->setText(QString("Chunk %1 (drawn with block %2)").arg(IndexText(s.chunk, ChunkCount())).arg(IndexText(s.block, BlockCount())));
 			line_box->blockSignals(true);

@@ -32,6 +32,7 @@ WEAK void Game_EditorLamp(int action) { (void)action; }
 WEAK void Game_EditorRedraw(void) {}
 WEAK const char *Game_EditorImportTerrain(int zone, int act, unsigned parts) { (void)zone; (void)act; (void)parts; return "this game cannot load another zone's terrain"; }
 WEAK bool Game_EditorZoneHasTerrain(int zone, int act) { (void)zone; (void)act; return false; }
+WEAK int Game_EditorAnimatedTiles(int *first, int *count, const char **label, int max) { (void)first; (void)count; (void)label; (void)max; return 0; }
 WEAK bool Game_EditorLoadBlockInfo(int zone, int act, int *plc1, int *plc2, int *pal) { (void)zone; (void)act; (void)plc1; (void)plc2; (void)pal; return false; }
 WEAK void Game_EditorSetMode(bool editing) { (void)editing; }
 

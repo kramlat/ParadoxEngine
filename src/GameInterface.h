@@ -89,6 +89,8 @@ void Game_EditorRedraw(void);
 #define EDITOR_IMPORT_SOLIDS  16
 const char *Game_EditorImportTerrain(int zone, int act, unsigned parts);
 bool Game_EditorZoneHasTerrain(int zone, int act);
+/// The tiles of the current level that its animated art writes over (the level's animation scripts): up to `max` runs, each its first tile and its tile count, and a name for it; returns how many. The editor shows them in the tile grid and does not edit them
+int Game_EditorAnimatedTiles(int *first, int *count, const char **label, int max);
 /// The sprite art lists and the palette a zone and act's level load block names (the numbers the table has them as), for the C row the editor makes for a level with an overlay. False when the zone has none.
 bool Game_EditorLoadBlockInfo(int zone, int act, int *plc1, int *plc2, int *pal);
 
