@@ -1615,9 +1615,15 @@ void AddTabs(QTabWidget *tabs) {
 			row_spins[plane] = new QSpinBox(page);
 			row_spins[plane]->setRange(16, 32);
 			row_spins[plane]->setValue(Editor_LayoutRows());
-			row_spins[plane]->setPrefix("Level rows: ");
-			row_spins[plane]->setSuffix(" (16 to 32: over 16 the level wraps by its own height)");
-			box->addWidget(row_spins[plane]);
+			row_spins[plane]->setFixedWidth(80);
+			row_spins[plane]->setToolTip("How many rows of chunks tall the level is, 16 to 32 (128 pixels a row). Over 16 the level wraps by its own height, as Sonic 3 & Knuckles' levels do.");
+			{
+				auto *rows_row = new QHBoxLayout(); // (a short box with its label beside it: a long suffix inside the box hid the number)
+				rows_row->addWidget(new QLabel("Level rows (16 to 32, 128 pixels each):", page));
+				rows_row->addWidget(row_spins[plane]);
+				rows_row->addStretch(1);
+				box->addLayout(rows_row);
+			}
 			QObject::connect(row_spins[plane], qOverload<int>(&QSpinBox::valueChanged), page, [=](int rows) {
 				Editor_SetLayoutRows(rows);
 				for (int k = 0; k < 2; k++) {
