@@ -506,7 +506,7 @@ void DrawTileWord(QPainter *p, uint16_t word, const QRect &at) {
 
 void DrawBlock(QPainter *p, int block, const QRect &at, bool x_flip = false, bool y_flip = false) {
 	size_t bytes;
-	const uint8_t *blocks = Editor_Blocks(&bytes);
+	const uint8_t *blocks = Editor_BlocksView(&bytes);
 	if (blocks == nullptr || size_t(block + 1) * 8 > bytes)
 		return;
 	const int half = at.width() / 2;

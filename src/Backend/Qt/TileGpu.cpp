@@ -98,7 +98,7 @@ void TileView::render(QRhiCommandBuffer *cb) {
 	data.clear();
 	size_t art_size = 0, blocks_size = 0, chunks_size = 0, solids_size[2] = { 0, 0 };
 	const uint8_t *art = Editor_Art(&art_size);
-	const uint8_t *blocks = Editor_Blocks(&blocks_size);
+	const uint8_t *blocks = Editor_BlocksView(&blocks_size);
 	const uint8_t *chunks = Editor_Chunks(&chunks_size);
 	const uint8_t *solids[2] = { Editor_Solids(0, &solids_size[0]), Editor_Solids(1, &solids_size[1]) };
 	const uint8_t *heights = Editor_HeightMap();

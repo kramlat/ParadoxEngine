@@ -200,6 +200,7 @@ void Editor_NoteSolids(int path, size_t bytes) { solid_bytes[path & 1] = bytes; 
 
 uint8_t *Editor_Art(size_t *bytes) { *bytes = art_bytes; return art_buffer; }
 uint8_t *Editor_Blocks(size_t *bytes) { *bytes = block_bytes; return level_map16; }
+const uint8_t *Editor_BlocksView(size_t *bytes) { *bytes = sizeof(level_map16); return level_map16; } // (the whole table: the animated blocks that the level writes past the file's are there too)
 uint8_t *Editor_Chunks(size_t *bytes) { *bytes = chunk_bytes; return level_map128; }
 uint8_t *Editor_Solids(int path, size_t *bytes) { *bytes = solid_bytes[path & 1]; return coll_index[path & 1]; }
 // The layout as the editor handles it: a fixed buffer of both planes (16 rows of $100 bytes), made from the level's planes when the editor first looks at a layout, and put back into them (each

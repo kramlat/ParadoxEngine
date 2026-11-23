@@ -79,6 +79,8 @@ bool Editor_AnimationOff(void);
 
 uint8_t *Editor_Art(size_t *bytes);
 uint8_t *Editor_Blocks(size_t *bytes);
+// The block table as the level draws from it, the animated blocks that are written past the file's included (for drawing only: the tools' counts are Editor_Blocks')
+const uint8_t *Editor_BlocksView(size_t *bytes);
 uint8_t *Editor_Chunks(size_t *bytes);
 uint8_t *Editor_Solids(int path, size_t *bytes);
 uint8_t *Editor_Layout(size_t *bytes); ///< level_layout: 16 rows of 256 bytes, the foreground's 128 chunks and then the background's, each a chunk number (0: empty)
