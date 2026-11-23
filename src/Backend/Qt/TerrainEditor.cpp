@@ -1145,6 +1145,7 @@ public:
 
 protected:
 	void Tiles(TileSink &sink, const QRect &) override {
+		LiveTiles live; // (the block under the solids moves with the level's animated art; only the Tiles and Blocks tabs, where the art is edited, show it as it is)
 		for (int path = 0; path < 2; path++) {
 			const QRect at(path * (16 * 8 + 24), 0, 16 * 8, 16 * 8);
 			sink.Fill(at, QColor(24, 24, 28));
