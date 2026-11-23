@@ -38,6 +38,7 @@ extern uint8_t level_map16[0x2000];
 /// The positions wrap as the old fixed buffer did (LEVEL_LAYOUT_COLS chunks across, LEVEL_LAYOUT_ROWS down) and are 0 where the plane has nothing: so a level is read exactly as before
 /// (the old buffer was zero outside the level too). The wrap is the engine's until the levels carry their own masks (the Sonic 3 scrolling engine: Layout_row_index_mask).
 #define LEVEL_LAYOUT_ROWS 16
+#define LEVEL_LAYOUT_MAX_ROWS 32 // (what a layout file can hold: LEVEL_LAYOUT_FILE_ROWS; the editor's buffer and the loader's are this tall, and a level of more than 16 rows wraps by its masks, ScrollEngine.h)
 #define LEVEL_LAYOUT_COLS 0x80
 
 typedef struct {
@@ -59,7 +60,7 @@ static inline uint8_t LevelLayout_Chunk(const LevelLayoutPlane *plane, int x, in
 void LevelLayout_SetChunk(LevelLayoutPlane *plane, int x, int y, uint8_t chunk);
 /// Gives a plane exactly width x rows (what it had is kept where it still fits; the rest is empty)
 void LevelLayout_Resize(LevelLayoutPlane *plane, int width, int rows);
-/// The whole layout as the editor handles it: both planes in a fixed buffer, 16 rows of $100 bytes (the foreground's $80 first, then the background's $80), and back
+/// The whole layout as the editor handles it: both planes in a fixed buffer, 32 (LEVEL_LAYOUT_MAX_ROWS) rows of $100 bytes (the foreground's $80 first, then the background's $80), and back
 void LevelLayout_ToInterleaved(uint8_t *interleaved);
 void LevelLayout_FromInterleaved(const uint8_t *interleaved);
 /// Dual collision heightmap arrays (collision curve ID -> 16 height bytes),

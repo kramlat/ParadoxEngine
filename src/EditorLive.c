@@ -10,6 +10,7 @@
 #include "GameInterface.h"
 #include "LevelData.h"
 #include "LevelLayout.h"
+#include "ScrollEngine.h"
 
 EditorSession editor_session;
 bool editor_open;
@@ -203,20 +204,46 @@ uint8_t *Editor_Blocks(size_t *bytes) { *bytes = block_bytes; return level_map16
 const uint8_t *Editor_BlocksView(size_t *bytes) { *bytes = sizeof(level_map16); return level_map16; } // (the whole table: the animated blocks that the level writes past the file's are there too)
 uint8_t *Editor_Chunks(size_t *bytes) { *bytes = chunk_bytes; return level_map128; }
 uint8_t *Editor_Solids(int path, size_t *bytes) { *bytes = solid_bytes[path & 1]; return coll_index[path & 1]; }
-// The layout as the editor handles it: a fixed buffer of both planes (16 rows of $100 bytes), made from the level's planes when the editor first looks at a layout, and put back into them (each
-// plane at the size that holds it) when the picture is redrawn. The planes themselves are only as big as the level.
-static uint8_t editor_layout[LEVEL_LAYOUT_ROWS * 0x100];
+// The layout as the editor handles it: a fixed buffer of both planes (LEVEL_LAYOUT_MAX_ROWS rows of $100 bytes), made from the level's planes when the editor first looks at a layout, and put back into them (each
+// plane at the size that holds it) when the picture is redrawn. The planes themselves are only as big as the level. editor_rows is how tall the level is (16 to 32): a layout of more rows than 16 wraps by its own masks.
+static uint8_t editor_layout[LEVEL_LAYOUT_MAX_ROWS * 0x100];
 static unsigned editor_layout_generation = ~0u;
 static bool editor_layout_changed;
-uint8_t *Editor_Layout(size_t *bytes) {
+static int editor_rows = LEVEL_LAYOUT_ROWS;
+static void SyncLayout(void) {
     if (editor_layout_generation != level_layout_generation) { // (another layout has been loaded since)
         LevelLayout_ToInterleaved(editor_layout);
         editor_layout_generation = level_layout_generation;
         editor_layout_changed = false;
+        editor_rows = LEVEL_LAYOUT_ROWS;
+        if (level_layout_fg.rows > editor_rows) editor_rows = level_layout_fg.rows;
+        if (level_layout_bg.rows > editor_rows) editor_rows = level_layout_bg.rows;
+        if (editor_rows > LEVEL_LAYOUT_MAX_ROWS) editor_rows = LEVEL_LAYOUT_MAX_ROWS;
     }
+}
+uint8_t *Editor_Layout(size_t *bytes) {
+    SyncLayout();
     *bytes = sizeof(editor_layout);
     editor_layout_changed = true; // (the caller may write it)
     return editor_layout;
+}
+int Editor_LayoutRows(void) {
+    SyncLayout();
+    return editor_rows;
+}
+void Editor_SetLayoutRows(int rows) {
+    SyncLayout();
+    if (rows < LEVEL_LAYOUT_ROWS) rows = LEVEL_LAYOUT_ROWS;
+    if (rows > LEVEL_LAYOUT_MAX_ROWS) rows = LEVEL_LAYOUT_MAX_ROWS;
+    if (rows == editor_rows)
+        return;
+    editor_rows = rows;
+    if (rows > LEVEL_LAYOUT_ROWS) { // (the level wraps at the next power of two that holds its rows: 32 for 17 to 32)
+        LevelLayoutSize wrap = { LEVEL_LAYOUT_COLS, LEVEL_LAYOUT_COLS, (uint16_t)rows, (uint16_t)rows };
+        ScrollEngine_SetLevelMasksForLayout(&wrap, false);
+    } else {
+        ScrollEngine_ResetLevelMasks();
+    }
 }
 const uint8_t *Editor_HeightMap(void) { return Collision_HeightMap; }
 const uint8_t *Editor_CurveAngles(void) { return Collision_Angle; }

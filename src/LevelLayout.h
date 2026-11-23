@@ -34,6 +34,8 @@ bool LevelLayout_Unpack(const uint8_t *file, size_t file_size, uint8_t *interlea
 
 /// Writes a layout file from `interleaved`: the planes' sizes are the smallest that hold everything that is not 0. Returns a malloc'd buffer (the caller frees it), its size in *out_size.
 uint8_t *LevelLayout_Pack(const uint8_t *interleaved, int rows, size_t *out_size, LevelLayoutSize *size);
+/// The same with a least height: a plane that holds something is at least `min_rows` rows tall (its bottom rows empty), for a level that is taller than what is drawn in it (the editor's)
+uint8_t *LevelLayout_PackRows(const uint8_t *interleaved, int rows, int min_rows, size_t *out_size, LevelLayoutSize *size);
 
 /// The level's layout: reads `file` into level_layout (and level_layout_size). `file_size` may be 0 when it is not known (the pointers are trusted then).
 bool LevelLayout_Load(const uint8_t *file, size_t file_size);

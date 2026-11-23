@@ -20,8 +20,8 @@ const uint8_t* FindNearestTile(Sst *obj, int16_t x, int16_t y) {
     // Real Sonic 2 uses the full byte (0-255) as the chunk ID directly --
     // unlike Sonic 1, there's no reserved high bit / multi_sprite remap
     // trick (that priority effect is Obj03/path-swapper's job now).
-    uint16_t cx = ((uint16_t)x >> 7) & (LEVEL_LAYOUT_COLS - 1);
-    uint16_t cy = ((uint16_t)y >> 7) & (LEVEL_LAYOUT_ROWS - 1);
+    uint16_t cx = ((uint16_t)x >> 7) & level_layout_col_mask;
+    uint16_t cy = ((uint16_t)y >> 7) & level_layout_row_mask;
     uint8_t chunk = LevelLayout_Chunk(LEVEL_LAYOUT_PLANE_FG, cx, cy);
     if (chunk == 0)
         return chunk0_dummy;

@@ -37,6 +37,10 @@ bool LevelLayout_Unpack(const uint8_t *file, size_t file_size, uint8_t *interlea
 }
 
 uint8_t *LevelLayout_Pack(const uint8_t *interleaved, int rows, size_t *out_size, LevelLayoutSize *size) {
+    return LevelLayout_PackRows(interleaved, rows, 0, out_size, size);
+}
+
+uint8_t *LevelLayout_PackRows(const uint8_t *interleaved, int rows, int min_rows, size_t *out_size, LevelLayoutSize *size) {
     LevelLayoutSize s = { 0, 0, 0, 0 };
     for (int plane = 0; plane < 2; plane++)
         for (int row = 0; row < rows; row++)
@@ -46,6 +50,11 @@ uint8_t *LevelLayout_Pack(const uint8_t *interleaved, int rows, size_t *out_size
                     if (col + 1 > *width) *width = (uint16_t)(col + 1);
                     if (row + 1 > *count) *count = (uint16_t)(row + 1);
                 }
+    if (min_rows > LEVEL_LAYOUT_FILE_ROWS) min_rows = LEVEL_LAYOUT_FILE_ROWS;
+    for (int plane = 0; plane < 2; plane++) { // (a level can be taller than what it holds: its empty bottom rows are rows of the file)
+        uint16_t *width = plane ? &s.bg_width : &s.fg_width, *count = plane ? &s.bg_rows : &s.fg_rows;
+        if (*width > 0 && *count < min_rows) *count = (uint16_t)min_rows;
+    }
     const size_t table = LEVEL_LAYOUT_FILE_HEADER + 2 * LEVEL_LAYOUT_FILE_ROWS * 2;
     const size_t total = table + (size_t)s.fg_width * s.fg_rows + (size_t)s.bg_width * s.bg_rows;
     uint8_t *out = calloc(total ? total : 1, 1);
@@ -75,6 +84,7 @@ uint8_t *LevelLayout_Pack(const uint8_t *interleaved, int rows, size_t *out_size
 #ifndef LEVELLAYOUT_NO_LEVEL // (the layout converter is built without the level's buffers)
 #include "LevelData.h"
 #include "Kosinski.h"
+#include "ScrollEngine.h"
 
 void LevelLayout_Resize(LevelLayoutPlane *plane, int width, int rows) {
     if (width < 0) width = 0;
@@ -102,8 +112,8 @@ void LevelLayout_SetChunk(LevelLayoutPlane *plane, int x, int y, uint8_t chunk) 
 }
 
 void LevelLayout_ToInterleaved(uint8_t *interleaved) {
-    memset(interleaved, 0, (size_t)LEVEL_LAYOUT_ROWS * 0x100);
-    for (int row = 0; row < LEVEL_LAYOUT_ROWS; row++)
+    memset(interleaved, 0, (size_t)LEVEL_LAYOUT_MAX_ROWS * 0x100);
+    for (int row = 0; row < LEVEL_LAYOUT_MAX_ROWS; row++)
         for (int col = 0; col < LEVEL_LAYOUT_COLS; col++) {
             interleaved[row * 0x100 + col] = LevelLayout_Chunk(&level_layout_fg, col, row);
             interleaved[row * 0x100 + 0x80 + col] = LevelLayout_Chunk(&level_layout_bg, col, row);
@@ -115,7 +125,7 @@ void LevelLayout_FromInterleaved(const uint8_t *interleaved) {
     for (int plane_i = 0; plane_i < 2; plane_i++) {
         LevelLayoutPlane *plane = plane_i ? &level_layout_bg : &level_layout_fg;
         int width = 0, rows = 0;
-        for (int row = 0; row < LEVEL_LAYOUT_ROWS; row++)
+        for (int row = 0; row < LEVEL_LAYOUT_MAX_ROWS; row++)
             for (int col = 0; col < LEVEL_LAYOUT_COLS; col++)
                 if (interleaved[row * 0x100 + plane_i * 0x80 + col] != 0) {
                     if (col + 1 > width) width = col + 1;
@@ -130,8 +140,8 @@ void LevelLayout_FromInterleaved(const uint8_t *interleaved) {
 
 bool LevelLayout_Load(const uint8_t *file, size_t file_size) {
     level_layout_generation++;
-    static uint8_t scratch[LEVEL_LAYOUT_ROWS * 0x100];
-    const bool ok = LevelLayout_Unpack(file, file_size, scratch, LEVEL_LAYOUT_ROWS, &level_layout_size);
+    static uint8_t scratch[LEVEL_LAYOUT_MAX_ROWS * 0x100];
+    const bool ok = LevelLayout_Unpack(file, file_size, scratch, LEVEL_LAYOUT_MAX_ROWS, &level_layout_size);
     // (each plane is exactly as big as its header says)
     for (int plane_i = 0; plane_i < 2; plane_i++) {
         LevelLayoutPlane *plane = plane_i ? &level_layout_bg : &level_layout_fg;
@@ -140,6 +150,14 @@ bool LevelLayout_Load(const uint8_t *file, size_t file_size) {
         LevelLayout_Resize(plane, width, rows);
         for (int row = 0; row < plane->rows; row++)
             memcpy(plane->data + (size_t)row * plane->width, scratch + row * 0x100 + plane_i * 0x80, plane->width);
+    }
+    // a layout of more than 16 rows wraps by its own masks (the default masks are 16 rows: a level that is as tall as that or less keeps them)
+    if (level_layout_size.fg_rows > LEVEL_LAYOUT_ROWS || level_layout_size.bg_rows > LEVEL_LAYOUT_ROWS) {
+        LevelLayoutSize wrap = level_layout_size; // (the width keeps its 128: only the rows are what this is for)
+        wrap.fg_width = wrap.bg_width = LEVEL_LAYOUT_COLS;
+        ScrollEngine_SetLevelMasksForLayout(&wrap, false);
+    } else {
+        ScrollEngine_ResetLevelMasks();
     }
     return ok;
 }
