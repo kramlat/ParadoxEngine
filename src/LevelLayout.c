@@ -9,7 +9,9 @@ static uint16_t Word(const uint8_t *p) { return (uint16_t)((p[0] << 8) | p[1]); 
 
 bool LevelLayout_Unpack(const uint8_t *file, size_t file_size, uint8_t *interleaved, int rows, LevelLayoutSize *size) {
     memset(interleaved, 0, (size_t)rows * 0x100);
-    LevelLayoutSize s = { Word(file), Word(file + 2), Word(file + 4), Word(file + 6) };
+    LevelLayoutSize s = { Word(file), Word(file + 2), Word(file + 4), Word(file + 6), false };
+    s.bg_wraps = (s.bg_width & 0x8000) != 0; // (the background's width word has bit 15 when it wraps at its own size)
+    s.bg_width &= 0x7FFF;
     bool ok = true;
     for (int plane = 0; plane < 2; plane++) {
         const uint16_t width = plane ? s.bg_width : s.fg_width, count = plane ? s.bg_rows : s.fg_rows;
@@ -37,11 +39,17 @@ bool LevelLayout_Unpack(const uint8_t *file, size_t file_size, uint8_t *interlea
 }
 
 uint8_t *LevelLayout_Pack(const uint8_t *interleaved, int rows, size_t *out_size, LevelLayoutSize *size) {
-    return LevelLayout_PackRows(interleaved, rows, 0, 0, out_size, size);
+    const LevelLayoutSize none = { 0, 0, 0, 0, false };
+    return LevelLayout_PackSized(interleaved, rows, &none, out_size, size);
 }
 
 uint8_t *LevelLayout_PackRows(const uint8_t *interleaved, int rows, int min_fg_rows, int min_bg_rows, size_t *out_size, LevelLayoutSize *size) {
-    LevelLayoutSize s = { 0, 0, 0, 0 };
+    const LevelLayoutSize wanted = { 0, 0, (uint16_t)min_fg_rows, (uint16_t)min_bg_rows, false };
+    return LevelLayout_PackSized(interleaved, rows, &wanted, out_size, size);
+}
+
+uint8_t *LevelLayout_PackSized(const uint8_t *interleaved, int rows, const LevelLayoutSize *wanted, size_t *out_size, LevelLayoutSize *size) {
+    LevelLayoutSize s = { 0, 0, 0, 0, false };
     for (int plane = 0; plane < 2; plane++)
         for (int row = 0; row < rows; row++)
             for (int col = 0; col < 0x80; col++)
@@ -50,17 +58,24 @@ uint8_t *LevelLayout_PackRows(const uint8_t *interleaved, int rows, int min_fg_r
                     if (col + 1 > *width) *width = (uint16_t)(col + 1);
                     if (row + 1 > *count) *count = (uint16_t)(row + 1);
                 }
-    for (int plane = 0; plane < 2; plane++) { // (a plane can be taller than what it holds: its empty bottom rows are rows of the file; each plane's height is its own)
-        int min_rows = plane ? min_bg_rows : min_fg_rows;
-        if (min_rows > LEVEL_LAYOUT_FILE_ROWS) min_rows = LEVEL_LAYOUT_FILE_ROWS;
+    for (int plane = 0; plane < 2; plane++) { // (a plane can be bigger than what it holds, its empty rows and columns part of the file; each plane's size is its own)
+        const uint16_t want_w = plane ? wanted->bg_width : wanted->fg_width, want_h = plane ? wanted->bg_rows : wanted->fg_rows;
         uint16_t *width = plane ? &s.bg_width : &s.fg_width, *count = plane ? &s.bg_rows : &s.fg_rows;
-        if (*width > 0 && *count < min_rows) *count = (uint16_t)min_rows;
+        if (plane && wanted->bg_wraps && want_w > 0 && want_h > 0) { // (a background that wraps at its own size is exactly that size)
+            *width = want_w > 0x80 ? 0x80 : want_w;
+            *count = want_h > LEVEL_LAYOUT_FILE_ROWS ? LEVEL_LAYOUT_FILE_ROWS : want_h;
+            s.bg_wraps = true;
+            continue;
+        }
+        if (*width > 0 && want_w > *width) *width = want_w > 0x80 ? 0x80 : want_w;
+        if (*width > 0 && want_h > *count) *count = want_h > LEVEL_LAYOUT_FILE_ROWS ? LEVEL_LAYOUT_FILE_ROWS : want_h;
     }
     const size_t table = LEVEL_LAYOUT_FILE_HEADER + 2 * LEVEL_LAYOUT_FILE_ROWS * 2;
     const size_t total = table + (size_t)s.fg_width * s.fg_rows + (size_t)s.bg_width * s.bg_rows;
     uint8_t *out = calloc(total ? total : 1, 1);
     out[0] = (uint8_t)(s.fg_width >> 8); out[1] = (uint8_t)s.fg_width;
-    out[2] = (uint8_t)(s.bg_width >> 8); out[3] = (uint8_t)s.bg_width;
+    const uint16_t bg_word = (uint16_t)(s.bg_width | (s.bg_wraps ? 0x8000 : 0));
+    out[2] = (uint8_t)(bg_word >> 8); out[3] = (uint8_t)bg_word;
     out[4] = (uint8_t)(s.fg_rows >> 8);  out[5] = (uint8_t)s.fg_rows;
     out[6] = (uint8_t)(s.bg_rows >> 8);  out[7] = (uint8_t)s.bg_rows;
     size_t at = table;
@@ -116,8 +131,9 @@ void LevelLayout_ToInterleaved(uint8_t *interleaved) {
     memset(interleaved, 0, (size_t)LEVEL_LAYOUT_MAX_ROWS * 0x100);
     for (int row = 0; row < LEVEL_LAYOUT_MAX_ROWS; row++)
         for (int col = 0; col < LEVEL_LAYOUT_COLS; col++) {
-            interleaved[row * 0x100 + col] = LevelLayout_Chunk(&level_layout_fg, col, row);
-            interleaved[row * 0x100 + 0x80 + col] = LevelLayout_Chunk(&level_layout_bg, col, row);
+            // (the plane's own cells: a plane that wraps at its own size is not repeated across the editor's buffer)
+            interleaved[row * 0x100 + col] = (col < level_layout_fg.width && row < level_layout_fg.rows) ? level_layout_fg.data[row * level_layout_fg.width + col] : 0;
+            interleaved[row * 0x100 + 0x80 + col] = (col < level_layout_bg.width && row < level_layout_bg.rows) ? level_layout_bg.data[row * level_layout_bg.width + col] : 0;
         }
 }
 
@@ -139,6 +155,21 @@ void LevelLayout_FromInterleaved(const uint8_t *interleaved) {
     }
 }
 
+void LevelLayout_FromInterleavedSized(const uint8_t *interleaved, const LevelLayoutSize *wanted) {
+    LevelLayout_FromInterleaved(interleaved);
+    level_layout_fg.wraps_own_size = false;
+    level_layout_bg.wraps_own_size = false;
+    if (wanted->bg_wraps && wanted->bg_width > 0 && wanted->bg_rows > 0) { // (a background that wraps at its own size is exactly the editor's size for it: what is outside is cut)
+        LevelLayoutPlane *plane = &level_layout_bg;
+        const int width = wanted->bg_width > 0x80 ? 0x80 : wanted->bg_width, rows = wanted->bg_rows > LEVEL_LAYOUT_MAX_ROWS ? LEVEL_LAYOUT_MAX_ROWS : wanted->bg_rows;
+        LevelLayout_Resize(plane, 0, 0);
+        LevelLayout_Resize(plane, width, rows);
+        for (int row = 0; row < rows; row++)
+            memcpy(plane->data + (size_t)row * width, interleaved + row * 0x100 + 0x80, (size_t)width);
+        plane->wraps_own_size = true;
+    }
+}
+
 bool LevelLayout_Load(const uint8_t *file, size_t file_size) {
     level_layout_generation++;
     static uint8_t scratch[LEVEL_LAYOUT_MAX_ROWS * 0x100];
@@ -149,6 +180,7 @@ bool LevelLayout_Load(const uint8_t *file, size_t file_size) {
         const int width = plane_i ? level_layout_size.bg_width : level_layout_size.fg_width, rows = plane_i ? level_layout_size.bg_rows : level_layout_size.fg_rows;
         LevelLayout_Resize(plane, 0, 0);
         LevelLayout_Resize(plane, width, rows);
+        plane->wraps_own_size = plane_i && level_layout_size.bg_wraps;
         for (int row = 0; row < plane->rows; row++)
             memcpy(plane->data + (size_t)row * plane->width, scratch + row * 0x100 + plane_i * 0x80, plane->width);
     }

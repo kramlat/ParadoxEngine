@@ -24,6 +24,7 @@
 typedef struct {
     uint16_t fg_width, bg_width; ///< chunks in a row
     uint16_t fg_rows, bg_rows;
+    bool bg_wraps; ///< the background wraps at its own width and height: bit 15 of its width word (a Sonic 3 & Knuckles layout never has it: widths are at most $80), so a small background repeats
 } LevelLayoutSize;
 
 extern LevelLayoutSize level_layout_size;
@@ -36,6 +37,11 @@ bool LevelLayout_Unpack(const uint8_t *file, size_t file_size, uint8_t *interlea
 uint8_t *LevelLayout_Pack(const uint8_t *interleaved, int rows, size_t *out_size, LevelLayoutSize *size);
 /// The same with a least height for each plane: a plane that holds something is at least that many rows tall (its bottom rows empty), for a level that is taller than what is drawn in it (the editor's)
 uint8_t *LevelLayout_PackRows(const uint8_t *interleaved, int rows, int min_fg_rows, int min_bg_rows, size_t *out_size, LevelLayoutSize *size);
+/// The editor's: the planes are at least `wanted` (the sizes the editor has them: a plane that holds something), and a background that wraps at its own size (`wanted->bg_wraps`) is exactly `wanted`'s size, with the flag in the file
+uint8_t *LevelLayout_PackSized(const uint8_t *interleaved, int rows, const LevelLayoutSize *wanted, size_t *out_size, LevelLayoutSize *size);
+
+/// Puts the editor's buffer back into the level's planes with the editor's sizes for them: a background that wraps at its own size (`wanted->bg_wraps`) takes exactly `wanted`'s width and height (what is outside is cut)
+void LevelLayout_FromInterleavedSized(const uint8_t *interleaved, const LevelLayoutSize *wanted);
 
 /// The level's layout: reads `file` into level_layout (and level_layout_size). `file_size` may be 0 when it is not known (the pointers are trusted then).
 bool LevelLayout_Load(const uint8_t *file, size_t file_size);

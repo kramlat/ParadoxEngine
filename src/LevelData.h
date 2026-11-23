@@ -1,4 +1,5 @@
 #pragma once
+#include <stdbool.h>
 
 #include <stdint.h>
 
@@ -44,6 +45,7 @@ extern uint8_t level_map16[0x2000];
 typedef struct {
 	uint8_t *data; ///< width * rows chunk numbers, row after row (NULL when the plane is empty)
 	uint16_t width, rows;
+	bool wraps_own_size; ///< the plane wraps at its own width and height (any size, not only powers of two): a small background that repeats. Set by the file (bit 15 of the background's width word) or the editor
 } LevelLayoutPlane;
 
 extern LevelLayoutPlane level_layout_fg, level_layout_bg;
@@ -53,6 +55,10 @@ extern unsigned level_layout_generation; ///< counts the layouts loaded (the lev
 
 extern unsigned level_layout_col_mask, level_layout_row_mask; ///< (ScrollEngine.h: how the level wraps; $7F and $F unless a level says otherwise)
 static inline uint8_t LevelLayout_Chunk(const LevelLayoutPlane *plane, int x, int y) {
+	if (plane->wraps_own_size && plane->width != 0 && plane->rows != 0) { // a plane that wraps at its own size (the header's width and height: any, not only powers of two), so a small one repeats
+		const int cx = ((x % plane->width) + plane->width) % plane->width, cy = ((y % plane->rows) + plane->rows) % plane->rows;
+		return plane->data[cy * plane->width + cx];
+	}
 	const unsigned cx = (unsigned)x & level_layout_col_mask, cy = (unsigned)y & level_layout_row_mask;
 	return (cx < plane->width && cy < plane->rows) ? plane->data[cy * plane->width + cx] : 0;
 }

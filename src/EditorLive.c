@@ -209,6 +209,8 @@ uint8_t *Editor_Solids(int path, size_t *bytes) { *bytes = solid_bytes[path & 1]
 static uint8_t editor_layout[LEVEL_LAYOUT_MAX_ROWS * 0x100];
 static unsigned editor_layout_generation = ~0u;
 static bool editor_layout_changed;
+static int editor_cols[2] = { LEVEL_LAYOUT_COLS, LEVEL_LAYOUT_COLS };
+static bool editor_bg_wraps;
 static int editor_rows[2] = { LEVEL_LAYOUT_ROWS, LEVEL_LAYOUT_ROWS }; // each plane's height: the foreground's and the background's (a background is often shorter than 16 rows)
 static void SyncLayout(void) {
     if (editor_layout_generation != level_layout_generation) { // (another layout has been loaded since)
@@ -219,6 +221,9 @@ static void SyncLayout(void) {
         editor_rows[1] = level_layout_bg.rows > 0 ? level_layout_bg.rows : LEVEL_LAYOUT_ROWS;
         for (int k = 0; k < 2; k++)
             if (editor_rows[k] > LEVEL_LAYOUT_MAX_ROWS) editor_rows[k] = LEVEL_LAYOUT_MAX_ROWS;
+        editor_cols[0] = level_layout_fg.width > 0 ? level_layout_fg.width : LEVEL_LAYOUT_COLS;
+        editor_cols[1] = level_layout_bg.width > 0 ? level_layout_bg.width : LEVEL_LAYOUT_COLS;
+        editor_bg_wraps = level_layout_bg.wraps_own_size;
     }
 }
 uint8_t *Editor_Layout(size_t *bytes) {
@@ -226,6 +231,25 @@ uint8_t *Editor_Layout(size_t *bytes) {
     *bytes = sizeof(editor_layout);
     editor_layout_changed = true; // (the caller may write it)
     return editor_layout;
+}
+int Editor_LayoutCols(int plane) {
+    SyncLayout();
+    return editor_cols[plane & 1];
+}
+void Editor_SetLayoutCols(int plane, int cols) {
+    SyncLayout();
+    if (cols < 1) cols = 1;
+    if (cols > LEVEL_LAYOUT_COLS) cols = LEVEL_LAYOUT_COLS;
+    editor_cols[plane & 1] = cols;
+}
+bool Editor_BgWraps(void) {
+    SyncLayout();
+    return editor_bg_wraps;
+}
+void Editor_SetBgWraps(bool wraps) {
+    SyncLayout();
+    editor_bg_wraps = wraps;
+    editor_layout_changed = true; // (the planes take it when the picture is redrawn)
 }
 int Editor_LayoutRows(int plane) {
     SyncLayout();
@@ -252,7 +276,8 @@ void Editor_CommitArt(int tile) {
 
 void Editor_RedrawLevel(void) {
     if (editor_layout_changed && editor_layout_generation == level_layout_generation) {
-        LevelLayout_FromInterleaved(editor_layout); // (the planes take what the editor changed)
+        const LevelLayoutSize wanted = { (uint16_t)editor_cols[0], (uint16_t)editor_cols[1], (uint16_t)editor_rows[0], (uint16_t)editor_rows[1], editor_bg_wraps };
+        LevelLayout_FromInterleavedSized(editor_layout, &wanted); // (the planes take what the editor changed)
         editor_layout_changed = false;
     }
     Game_EditorRedraw();
