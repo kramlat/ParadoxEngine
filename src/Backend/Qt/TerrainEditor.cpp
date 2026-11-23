@@ -477,7 +477,7 @@ QImage TileImage(int tile, int line, bool x_flip, bool y_flip) {
 	QImage image(8, 8, QImage::Format_ARGB32);
 	size_t bytes;
 	const uint8_t *art = Editor_Art(&bytes);
-	if (live_tiles && tile >= 0 && tile < VRAM_SIZE / 32) {
+	if (tile >= 0 && tile < VRAM_SIZE / 32 && (live_tiles || size_t(tile + 1) * 32 > bytes)) { // (live, or past the end of the level's art: the video memory has it, where the animated art is)
 		art = VDP_TileSpace();
 		bytes = VRAM_SIZE;
 	}

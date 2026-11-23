@@ -33,6 +33,9 @@ vec3 TilePixel(uint tile, uint line, uint x, uint y, bool live) {
     } else if ((tile + 1u) * 32u <= art.y) {
         uint b = Byte(art.x + at);
         c = (x & 1u) != 0u ? (b & 15u) : (b >> 4);
+    } else if (tile < 0x800u) { // (a tile past the end of the level's art: what the video memory has there, where the animated art is)
+        uint b = Byte(art.z + at);
+        c = (x & 1u) != 0u ? (b & 15u) : (b >> 4);
     }
     return c == 0u ? vec3(40.0, 40.0, 48.0) / 255.0 : Rgb(d[art.w + line * 16u + c]);
 }
