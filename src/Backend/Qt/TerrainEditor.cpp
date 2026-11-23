@@ -1302,7 +1302,7 @@ public:
 		Resize();
 	}
 	void Resize() { // (the level's rows: 16 to 32)
-		setFixedSize(128 * zoom_ + 1, Editor_LayoutRows() * zoom_ + 1);
+		setFixedSize(128 * zoom_ + 1, Editor_LayoutRows(plane_) * zoom_ + 1);
 		update();
 	}
 
@@ -1310,7 +1310,7 @@ protected:
 	void Tiles(TileSink &sink, const QRect &area) override {
 		size_t bytes;
 		const uint8_t *layout = Editor_Layout(&bytes);
-		for (int row = qMax(0, area.top() / zoom_); row <= qMin(Editor_LayoutRows() - 1, area.bottom() / zoom_); row++)
+		for (int row = qMax(0, area.top() / zoom_); row <= qMin(Editor_LayoutRows(plane_) - 1, area.bottom() / zoom_); row++)
 			for (int col = qMax(0, area.left() / zoom_); col <= qMin(127, area.right() / zoom_); col++) {
 				const int chunk = layout[row * 256 + plane_ * 128 + col];
 				sink.Thumb(chunk, QRect(col * zoom_, row * zoom_, zoom_, zoom_), mode_);
@@ -1320,7 +1320,7 @@ protected:
 		p.setPen(QColor(0, 0, 0, 70));
 		for (int c = area.left() / zoom_; c <= qMin(128, area.right() / zoom_ + 1); c++)
 			p.drawLine(c * zoom_, 0, c * zoom_, height());
-		for (int r = 0; r <= Editor_LayoutRows(); r++)
+		for (int r = 0; r <= Editor_LayoutRows(plane_); r++)
 			p.drawLine(0, r * zoom_, width(), r * zoom_);
 		if (plane_ == 0 && guides_box != nullptr && guides_box->isChecked())
 			DrawGuides(&p);
@@ -1369,7 +1369,7 @@ private:
 	}
 	void Use(QMouseEvent *e) {
 		const int col = e->position().toPoint().x() / zoom_, row = e->position().toPoint().y() / zoom_;
-		if (col < 0 || col > 127 || row < 0 || row >= Editor_LayoutRows())
+		if (col < 0 || col > 127 || row < 0 || row >= Editor_LayoutRows(plane_))
 			return;
 		size_t bytes;
 		uint8_t *layout = Editor_Layout(&bytes);
@@ -1613,28 +1613,21 @@ void AddTabs(QTabWidget *tabs) {
 			box->addWidget(chunk_picks[plane]);
 			box->addWidget(picker_area);
 			row_spins[plane] = new QSpinBox(page);
-			row_spins[plane]->setRange(16, 32);
-			row_spins[plane]->setValue(Editor_LayoutRows());
+			row_spins[plane]->setRange(1, 32);
+			row_spins[plane]->setValue(Editor_LayoutRows(plane));
 			row_spins[plane]->setFixedWidth(80);
-			row_spins[plane]->setToolTip("How many rows of chunks tall the level is, 16 to 32 (128 pixels a row). Over 16 the level wraps by its own height, as Sonic 3 & Knuckles' levels do.");
+			row_spins[plane]->setToolTip("How many rows of chunks tall this plane is, 1 to 32 (128 pixels a row): a background is often shorter than 16. Each plane has its own height, and the level wraps by its height, 32 rows at the least (a level that loops goes round exactly its own).");
 			{
 				auto *rows_row = new QHBoxLayout(); // (a short box with its label beside it: a long suffix inside the box hid the number)
-				rows_row->addWidget(new QLabel("Level rows (16 to 32, 128 pixels each):", page));
+				rows_row->addWidget(new QLabel(plane == 0 ? "Foreground rows (1 to 32, 128 pixels each):" : "Background rows (1 to 32, 128 pixels each):", page));
 				rows_row->addWidget(row_spins[plane]);
 				rows_row->addStretch(1);
 				box->addLayout(rows_row);
 			}
 			QObject::connect(row_spins[plane], qOverload<int>(&QSpinBox::valueChanged), page, [=](int rows) {
-				Editor_SetLayoutRows(rows);
-				for (int k = 0; k < 2; k++) {
-					if (row_spins[k] != nullptr && row_spins[k]->value() != rows) {
-						row_spins[k]->blockSignals(true);
-						row_spins[k]->setValue(rows);
-						row_spins[k]->blockSignals(false);
-					}
-					if (canvases[k] != nullptr)
-						canvases[k]->Resize();
-				}
+				Editor_SetLayoutRows(plane, rows);
+				if (canvases[plane] != nullptr)
+					canvases[plane]->Resize();
 				InvalidateThumbs();
 				if (s.refresh_all)
 					s.refresh_all();
@@ -1775,9 +1768,9 @@ void AddTabs(QTabWidget *tabs) {
 			palette->Load();
 			solids->Load();
 			for (int plane = 0; plane < 2; plane++) {
-				if (row_spins[plane] != nullptr && row_spins[plane]->value() != Editor_LayoutRows()) { // (another level: its height)
+				if (row_spins[plane] != nullptr && row_spins[plane]->value() != Editor_LayoutRows(plane)) { // (another level: its height)
 					row_spins[plane]->blockSignals(true);
-					row_spins[plane]->setValue(Editor_LayoutRows());
+					row_spins[plane]->setValue(Editor_LayoutRows(plane));
 					row_spins[plane]->blockSignals(false);
 				}
 				canvases[plane]->Resize();
@@ -1867,7 +1860,11 @@ bool Save(const QString &slot, int zone, int act, QString *message) {
 		QByteArray keymaker_level = QString("%1%2").arg(Editor_TargetCode()).arg(act + 1).toLatin1();
 		const char *name = Editor_HasTarget() ? keymaker_level.constData() : Peek_LevelName(zone, act);
 		size_t file_size, packed_size;
-		uint8_t *file_data = LevelLayout_PackRows(layout, int(bytes / 0x100), Editor_LayoutRows() > 16 ? Editor_LayoutRows() : 0, &file_size, nullptr); // (the Sonic 3 & Knuckles layout format, then Kosinski: LevelLayout.h)
+		std::vector<uint8_t> clipped(layout, layout + bytes); // (what is below a plane's own height is not saved: making a plane shorter cuts it)
+		for (int plane = 0; plane < 2; plane++)
+			for (int row = Editor_LayoutRows(plane); row < int(bytes / 0x100); row++)
+				memset(clipped.data() + row * 0x100 + plane * 0x80, 0, 0x80);
+		uint8_t *file_data = LevelLayout_PackRows(clipped.data(), int(bytes / 0x100), Editor_LayoutRows(0), Editor_LayoutRows(1), &file_size, nullptr); // (the Sonic 3 & Knuckles layout format, then Kosinski: LevelLayout.h)
 		uint8_t *packed = KosEnc(file_data, file_size, &packed_size);
 		free(file_data);
 		const QString path = folder && name ? QString("%1/%2/%3").arg(slot, folder, name) : QString("%1/layout_act%2.kos").arg(slot).arg(act + 1);

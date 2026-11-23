@@ -209,16 +209,16 @@ uint8_t *Editor_Solids(int path, size_t *bytes) { *bytes = solid_bytes[path & 1]
 static uint8_t editor_layout[LEVEL_LAYOUT_MAX_ROWS * 0x100];
 static unsigned editor_layout_generation = ~0u;
 static bool editor_layout_changed;
-static int editor_rows = LEVEL_LAYOUT_ROWS;
+static int editor_rows[2] = { LEVEL_LAYOUT_ROWS, LEVEL_LAYOUT_ROWS }; // each plane's height: the foreground's and the background's (a background is often shorter than 16 rows)
 static void SyncLayout(void) {
     if (editor_layout_generation != level_layout_generation) { // (another layout has been loaded since)
         LevelLayout_ToInterleaved(editor_layout);
         editor_layout_generation = level_layout_generation;
         editor_layout_changed = false;
-        editor_rows = LEVEL_LAYOUT_ROWS;
-        if (level_layout_fg.rows > editor_rows) editor_rows = level_layout_fg.rows;
-        if (level_layout_bg.rows > editor_rows) editor_rows = level_layout_bg.rows;
-        if (editor_rows > LEVEL_LAYOUT_MAX_ROWS) editor_rows = LEVEL_LAYOUT_MAX_ROWS;
+        editor_rows[0] = level_layout_fg.rows > 0 ? level_layout_fg.rows : LEVEL_LAYOUT_ROWS; // (the layout's own heights, whatever they are)
+        editor_rows[1] = level_layout_bg.rows > 0 ? level_layout_bg.rows : LEVEL_LAYOUT_ROWS;
+        for (int k = 0; k < 2; k++)
+            if (editor_rows[k] > LEVEL_LAYOUT_MAX_ROWS) editor_rows[k] = LEVEL_LAYOUT_MAX_ROWS;
     }
 }
 uint8_t *Editor_Layout(size_t *bytes) {
@@ -227,18 +227,17 @@ uint8_t *Editor_Layout(size_t *bytes) {
     editor_layout_changed = true; // (the caller may write it)
     return editor_layout;
 }
-int Editor_LayoutRows(void) {
+int Editor_LayoutRows(int plane) {
     SyncLayout();
-    return editor_rows;
+    return editor_rows[plane & 1];
 }
-void Editor_SetLayoutRows(int rows) {
+void Editor_SetLayoutRows(int plane, int rows) {
     SyncLayout();
-    if (rows < LEVEL_LAYOUT_ROWS) rows = LEVEL_LAYOUT_ROWS;
+    if (rows < 1) rows = 1;
     if (rows > LEVEL_LAYOUT_MAX_ROWS) rows = LEVEL_LAYOUT_MAX_ROWS;
-    if (rows == editor_rows)
-        return;
-    editor_rows = rows;
-    LevelLayoutSize wrap = { LEVEL_LAYOUT_COLS, LEVEL_LAYOUT_COLS, LEVEL_LAYOUT_MAX_ROWS, LEVEL_LAYOUT_MAX_ROWS }; // (a level wraps at 32 rows, never before: LevelLayout_Load)
+    editor_rows[plane & 1] = rows;
+    // the level wraps by its height, 32 rows at the least (LevelLayout_Load)
+    LevelLayoutSize wrap = { LEVEL_LAYOUT_COLS, LEVEL_LAYOUT_COLS, LEVEL_LAYOUT_MAX_ROWS, LEVEL_LAYOUT_MAX_ROWS };
     ScrollEngine_SetLevelMasksForLayout(&wrap, level_layout_loops);
 }
 const uint8_t *Editor_HeightMap(void) { return Collision_HeightMap; }

@@ -37,10 +37,10 @@ bool LevelLayout_Unpack(const uint8_t *file, size_t file_size, uint8_t *interlea
 }
 
 uint8_t *LevelLayout_Pack(const uint8_t *interleaved, int rows, size_t *out_size, LevelLayoutSize *size) {
-    return LevelLayout_PackRows(interleaved, rows, 0, out_size, size);
+    return LevelLayout_PackRows(interleaved, rows, 0, 0, out_size, size);
 }
 
-uint8_t *LevelLayout_PackRows(const uint8_t *interleaved, int rows, int min_rows, size_t *out_size, LevelLayoutSize *size) {
+uint8_t *LevelLayout_PackRows(const uint8_t *interleaved, int rows, int min_fg_rows, int min_bg_rows, size_t *out_size, LevelLayoutSize *size) {
     LevelLayoutSize s = { 0, 0, 0, 0 };
     for (int plane = 0; plane < 2; plane++)
         for (int row = 0; row < rows; row++)
@@ -50,8 +50,9 @@ uint8_t *LevelLayout_PackRows(const uint8_t *interleaved, int rows, int min_rows
                     if (col + 1 > *width) *width = (uint16_t)(col + 1);
                     if (row + 1 > *count) *count = (uint16_t)(row + 1);
                 }
-    if (min_rows > LEVEL_LAYOUT_FILE_ROWS) min_rows = LEVEL_LAYOUT_FILE_ROWS;
-    for (int plane = 0; plane < 2; plane++) { // (a level can be taller than what it holds: its empty bottom rows are rows of the file)
+    for (int plane = 0; plane < 2; plane++) { // (a plane can be taller than what it holds: its empty bottom rows are rows of the file; each plane's height is its own)
+        int min_rows = plane ? min_bg_rows : min_fg_rows;
+        if (min_rows > LEVEL_LAYOUT_FILE_ROWS) min_rows = LEVEL_LAYOUT_FILE_ROWS;
         uint16_t *width = plane ? &s.bg_width : &s.fg_width, *count = plane ? &s.bg_rows : &s.fg_rows;
         if (*width > 0 && *count < min_rows) *count = (uint16_t)min_rows;
     }

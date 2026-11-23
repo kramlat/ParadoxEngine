@@ -84,8 +84,8 @@ const uint8_t *Editor_BlocksView(size_t *bytes);
 uint8_t *Editor_Chunks(size_t *bytes);
 uint8_t *Editor_Solids(int path, size_t *bytes);
 uint8_t *Editor_Layout(size_t *bytes); ///< level_layout: 32 (LEVEL_LAYOUT_MAX_ROWS) rows of 256 bytes, the foreground's 128 chunks and then the background's, each a chunk number (0: empty); only the first Editor_LayoutRows() are the level's
-int Editor_LayoutRows(void); ///< how tall the level is: 16 to 32 rows (a layout file of more rows than 16 is that tall)
-void Editor_SetLayoutRows(int rows); ///< makes the level taller or shorter (16 to 32); the level wraps by that many rows (ScrollEngine_SetLevelMasksForLayout)
+int Editor_LayoutRows(int plane); ///< how tall a plane is (0 the foreground, 1 the background): 1 to 32 rows, what the layout file says
+void Editor_SetLayoutRows(int plane, int rows); ///< makes a plane taller or shorter (1 to 32): a background is often shorter than 16 rows
 const uint8_t *Editor_HeightMap(void); ///< 16 heights for each of the 256 collision curves, and the angle of each
 const uint8_t *Editor_CurveAngles(void);
 
