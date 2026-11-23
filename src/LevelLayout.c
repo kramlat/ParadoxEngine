@@ -151,13 +151,15 @@ bool LevelLayout_Load(const uint8_t *file, size_t file_size) {
         for (int row = 0; row < plane->rows; row++)
             memcpy(plane->data + (size_t)row * plane->width, scratch + row * 0x100 + plane_i * 0x80, plane->width);
     }
-    // how the level wraps: by its height (the height words of the layout file, the Sonic 3 & Knuckles format) but never before 32 rows (4,096 pixels, the most the format holds: Sonic 3's levels do not wrap at the
-    // 16 rows of Sonic 2's), and a level that loops vertically (its top limit is $FF00: Metropolis) goes round a drum of 16 rows
+    // how the level wraps, from the height words of the layout file (the Sonic 3 & Knuckles format: the rows of each plane, words $04 and $06 of the header): a level that loops vertically (its top limit is $FF00:
+    // Metropolis) goes round exactly its height (16 rows when the file says nothing), and any other wraps at 32 rows at the least (4,096 pixels, the most the format holds: Sonic 3's levels do not wrap at the 16 rows of Sonic 2's)
     unsigned height = level_layout_size.fg_rows > level_layout_size.bg_rows ? level_layout_size.fg_rows : level_layout_size.bg_rows;
-    if (height < LEVEL_LAYOUT_MAX_ROWS)
+    if (level_layout_loops && height == 0)
+        height = LEVEL_LAYOUT_ROWS;
+    if (!level_layout_loops && height < LEVEL_LAYOUT_MAX_ROWS)
         height = LEVEL_LAYOUT_MAX_ROWS;
     LevelLayoutSize wrap = { LEVEL_LAYOUT_COLS, LEVEL_LAYOUT_COLS, (uint16_t)height, (uint16_t)height }; // (the width keeps its 128: only the rows are what this is for)
-    ScrollEngine_SetLevelMasksForLayout(&wrap, level_layout_loops);
+    ScrollEngine_SetLevelMasksForLayout(&wrap, false);
     return ok;
 }
 
