@@ -49,6 +49,15 @@ void Editor_Apply(void);
 void Editor_SetCursor(int x, int y);
 void Editor_GetCursor(int *x, int *y);
 void Editor_Hold(void);
+/// Object placement mode on the pad (the keys that stand for it): what was pressed since the last call, as EDITOR_PAD_ bits, for the window to act on with what it has chosen
+#define EDITOR_PAD_PLACE      (1 << 0) ///< C: place the chosen object (or ring) at the cursor
+#define EDITOR_PAD_NEXT       (1 << 1) ///< A: the next object in the list
+#define EDITOR_PAD_PREVIOUS   (1 << 2) ///< Y: the one before
+#define EDITOR_PAD_SUBTYPE_DEC (1 << 3) ///< right stick left, [
+#define EDITOR_PAD_SUBTYPE_INC (1 << 4) ///< right stick right, ]
+#define EDITOR_PAD_DELETE     (1 << 5) ///< B: delete the object (or ring) nearest the cursor
+uint8_t Editor_TakePadActions(void);
+int Editor_LevelBottom(void); ///< the lowest Y the cursor goes to: the level's own height (at least $7FF)
 /// The camera follows the cursor, not the player: around the game's camera scroll the cursor stands in for the first player (so nothing else sees it: the signpost, the checkpoints and the other things that wait for
 /// the player to come near are triggered by the player alone). Editor_Editing: the level is being edited, not played (the game's dynamic level events do not run then).
 void Editor_CameraBegin(void);
@@ -87,8 +96,10 @@ uint8_t *Editor_Layout(size_t *bytes); ///< level_layout: 32 (LEVEL_LAYOUT_MAX_R
 int Editor_LayoutRows(int plane); ///< how tall a plane is (0 the foreground, 1 the background): 1 to 32 rows, what the layout file says
 int Editor_LayoutCols(int plane); ///< how wide a plane is (1 to 128 chunks)
 void Editor_SetLayoutCols(int plane, int cols);
-bool Editor_BgWraps(void); ///< the background wraps at its own width and height (a small one repeats): saved in the layout file, bit 15 of the background's width word
+bool Editor_BgWraps(void); ///< the background wraps sideways at its own width (a narrow one repeats): saved in the layout file, bit 15 of the background's width word
 void Editor_SetBgWraps(bool wraps);
+bool Editor_BgWrapsY(void); ///< the same up and down: bit 15 of the background's height word (each axis wraps on its own)
+void Editor_SetBgWrapsY(bool wraps);
 void Editor_SetLayoutRows(int plane, int rows); ///< makes a plane taller or shorter (1 to 32): a background is often shorter than 16 rows
 const uint8_t *Editor_HeightMap(void); ///< 16 heights for each of the 256 collision curves, and the angle of each
 const uint8_t *Editor_CurveAngles(void);

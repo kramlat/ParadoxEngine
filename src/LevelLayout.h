@@ -24,7 +24,8 @@
 typedef struct {
     uint16_t fg_width, bg_width; ///< chunks in a row
     uint16_t fg_rows, bg_rows;
-    bool bg_wraps; ///< the background wraps at its own width and height: bit 15 of its width word (a Sonic 3 & Knuckles layout never has it: widths are at most $80), so a small background repeats
+    bool bg_wraps;   ///< the background wraps sideways at its own width: bit 15 of its width word (a Sonic 3 & Knuckles layout never has it: widths are at most $80), so a narrow background repeats
+    bool bg_wraps_y; ///< the background wraps up and down at its own height: bit 15 of its height word (heights are at most $20), so a short background repeats. Each axis is its own choice
 } LevelLayoutSize;
 
 extern LevelLayoutSize level_layout_size;

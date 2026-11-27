@@ -801,15 +801,32 @@ void DrawOverlay(QPainter *p, const QRectF &dest, double scale) {
 	Editor_GetCursor(&cx, &cy);
 	const QPointF cursor = to_widget(cx, cy);
 	p->setBrush(Qt::NoBrush);
-	if (w.place_rings->isChecked()) {
+	if (w.place_rings->isChecked()) { // (the rings C would place: the line itself, each ring where it would be, down or across, the first at the cursor)
+		const int n = w.ring_count->value();
+		const bool down = w.vertical->isChecked();
+		for (int i = 0; i < n; i++) {
+			const QPointF at = to_widget(down ? cx : cx + i * 0x18, down ? cy + i * 0x18 : cy);
+			p->setPen(QPen(QColor(255, 255, 80), 2));
+			p->drawEllipse(at, half * 1.1, half * 1.1);
+			p->setPen(QPen(QColor(255, 160, 0), 2));
+			p->drawEllipse(at, half * 0.6, half * 0.6);
+		}
+	} else { // (the object: its box, as a placed one is drawn, with its id, a cross at the spot, and an arrow for each flip)
+		const QPointF at = cursor;
 		p->setPen(QPen(QColor(255, 255, 80), 2));
-		p->drawEllipse(cursor, half * 1.3, half * 1.3);
-		p->setPen(QPen(QColor(255, 160, 0), 2));
-		p->drawEllipse(cursor, half * 0.7, half * 0.7);
-	} else {
-		p->setPen(QPen(QColor(255, 255, 80), 2));
-		p->drawLine(QPointF(cursor.x() - half * 1.5, cursor.y()), QPointF(cursor.x() + half * 1.5, cursor.y()));
-		p->drawLine(QPointF(cursor.x(), cursor.y() - half * 1.5), QPointF(cursor.x(), cursor.y() + half * 1.5));
+		p->drawRect(QRectF(at.x() - half, at.y() - half, half * 2, half * 2));
+		p->drawLine(QPointF(at.x() - half * 1.5, at.y()), QPointF(at.x() + half * 1.5, at.y()));
+		p->drawLine(QPointF(at.x(), at.y() - half * 1.5), QPointF(at.x(), at.y() + half * 1.5));
+		if (w.x_flip->isChecked())
+			p->drawText(QPointF(at.x() - half * 2.2, at.y() + 4), "<");
+		if (w.y_flip->isChecked())
+			p->drawText(QPointF(at.x() - 3, at.y() + half * 2.4), "v");
+	}
+	{ // (what C would place: its id, name and subtype, beside the cursor)
+		const QString what = w.place_rings->isChecked() ? QString("%1 rings").arg(w.ring_count->value())
+		                                                : QString("$%1 %2  sub $%3").arg(HexText(PickedId(), 2), ObjectLabel(PickedId()), HexText(w.subtype->value(), 2));
+		p->setPen(QColor(255, 255, 80));
+		p->drawText(QPointF(cursor.x() + half * 1.8, cursor.y() - half * 1.2), what);
 	}
 	p->setPen(QPen(QColor(255, 220, 0), 1));
 	for (int i = 0; i < level.ring_count; i++) {
@@ -861,6 +878,54 @@ void DrawOverlay(QPainter *p, const QRectF &dest, double scale) {
 	}
 }
 
+// Object placement mode on the pad (EditorLive.h: C places, A and Y step through the list, the right stick the subtype, B deletes): what debug mode does, with the editor's full list of objects instead of the zone's debug list
+void PadActions() {
+	const uint8_t actions = Editor_TakePadActions();
+	if (actions == 0 || !Editing())
+		return;
+	EditorLevel &level = editor_session.level;
+	const bool objects = w.place_objects->isChecked();
+	int cx, cy;
+	Editor_GetCursor(&cx, &cy);
+	if (actions & (EDITOR_PAD_NEXT | EDITOR_PAD_PREVIOUS)) { // (the next object that the filter shows, round the list)
+		const int dir = (actions & EDITOR_PAD_PREVIOUS) ? -1 : 1, count = w.id_list->count();
+		int row = w.id_list->currentRow();
+		for (int n = 0; n < count; n++) {
+			row = (row + dir + count) % count;
+			if (!w.id_list->item(row)->isHidden()) {
+				w.id_list->setCurrentRow(row);
+				break;
+			}
+		}
+	}
+	if (actions & (EDITOR_PAD_SUBTYPE_DEC | EDITOR_PAD_SUBTYPE_INC))
+		w.subtype->setValue((w.subtype->value() + ((actions & EDITOR_PAD_SUBTYPE_INC) ? 1 : 0) - ((actions & EDITOR_PAD_SUBTYPE_DEC) ? 1 : 0)) & 0xFF);
+	if (actions & EDITOR_PAD_PLACE) {
+		if (objects) {
+			const EditorObject o = NewObject(cx, cy);
+			const int at = EditorLevel_AddObject(&level, &o);
+			Changed(at < 0 ? "The object list is full." : QString("Placed object $%1 at $%2, $%3.").arg(HexText(o.id, 2), HexText(o.x, 4), HexText(o.y, 3)));
+			if (at >= 0)
+				w.objects->selectRow(at);
+		} else {
+			EditorRing r = {};
+			r.x = (uint16_t)qMax(0, cx);
+			r.y = (uint16_t)qBound(0, cy, 0xFFF);
+			r.count = (uint8_t)w.ring_count->value();
+			r.vertical = w.vertical->isChecked();
+			const int at = EditorLevel_AddRing(&level, &r);
+			Changed(at < 0 ? "The ring list is full." : QString("Placed %1 rings at $%2, $%3.").arg(r.count).arg(HexText(r.x, 4), HexText(r.y, 3)));
+		}
+	}
+	if (actions & EDITOR_PAD_DELETE) {
+		const int found = objects ? EditorLevel_FindObject(&level, cx, cy, kPickRadius) : EditorLevel_FindRing(&level, cx, cy, kPickRadius);
+		if (found >= 0) {
+			objects ? EditorLevel_RemoveObject(&level, found) : EditorLevel_RemoveRing(&level, found);
+			Changed("Deleted.");
+		}
+	}
+}
+
 void Poll() {
 	if (!IsOpen())
 		return;
@@ -890,6 +955,7 @@ void Poll() {
 		w.playtest_button->blockSignals(false);
 	}
 	w.playtest_button->setText(editor_playtest ? "Back to editing" : "Playtest (show Sonic)");
+	PadActions();
 }
 
 } // namespace LevelEditor

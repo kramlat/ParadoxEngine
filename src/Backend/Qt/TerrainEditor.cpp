@@ -1600,7 +1600,7 @@ void AddTabs(QTabWidget *tabs) {
 		LayerCanvas *canvases[2] = { nullptr, nullptr };
 		static QSpinBox *row_spins[2]; // each plane's rows (1 to 32) and widths (1 to 128), on its own page
 		static QSpinBox *col_spins[2] = { nullptr, nullptr };
-		static QCheckBox *wrap_box = nullptr;
+		static QCheckBox *wrap_box = nullptr, *wrap_y_box = nullptr;
 		QLabel *chunk_picks[2];
 		for (int plane = 0; plane < 2; plane++) {
 			auto *page = new QWidget();
@@ -1641,7 +1641,7 @@ void AddTabs(QTabWidget *tabs) {
 						s.refresh_all();
 				});
 				if (plane == 1) {
-					wrap_box = new QCheckBox("This background wraps at its own width and height (a small one repeats: saved in the layout, bit 15 of its width word)", page);
+					wrap_box = new QCheckBox("Wraps sideways at its own width (a narrow background repeats: bit 15 of its width word)", page);
 					wrap_box->setChecked(Editor_BgWraps());
 					QObject::connect(wrap_box, &QCheckBox::toggled, page, [](bool on) {
 						Editor_SetBgWraps(on);
@@ -1650,6 +1650,15 @@ void AddTabs(QTabWidget *tabs) {
 							s.refresh_all();
 					});
 					box->addWidget(wrap_box);
+					wrap_y_box = new QCheckBox("Wraps up and down at its own height (a short background repeats: bit 15 of its height word)", page);
+					wrap_y_box->setChecked(Editor_BgWrapsY());
+					QObject::connect(wrap_y_box, &QCheckBox::toggled, page, [](bool on) {
+						Editor_SetBgWrapsY(on);
+						InvalidateThumbs();
+						if (s.refresh_all)
+							s.refresh_all();
+					});
+					box->addWidget(wrap_y_box);
 				}
 			}
 			QObject::connect(row_spins[plane], qOverload<int>(&QSpinBox::valueChanged), page, [=](int rows) {
@@ -1811,6 +1820,11 @@ void AddTabs(QTabWidget *tabs) {
 					wrap_box->setChecked(Editor_BgWraps());
 					wrap_box->blockSignals(false);
 				}
+				if (plane == 1 && wrap_y_box != nullptr && wrap_y_box->isChecked() != Editor_BgWrapsY()) {
+					wrap_y_box->blockSignals(true);
+					wrap_y_box->setChecked(Editor_BgWrapsY());
+					wrap_y_box->blockSignals(false);
+				}
 				canvases[plane]->Resize();
 				canvases[plane]->update();
 				chunk_picks[plane]->setText("Painting with chunk " + IndexText(s.chunk, ChunkCount()));
@@ -1903,7 +1917,7 @@ bool Save(const QString &slot, int zone, int act, QString *message) {
 			for (int row = 0; row < int(bytes / 0x100); row++)
 				for (int col = (row < Editor_LayoutRows(plane)) ? Editor_LayoutCols(plane) : 0; col < 0x80; col++)
 					clipped[row * 0x100 + plane * 0x80 + col] = 0; // (and the columns past its width)
-		const LevelLayoutSize wanted = { uint16_t(Editor_LayoutCols(0)), uint16_t(Editor_LayoutCols(1)), uint16_t(Editor_LayoutRows(0)), uint16_t(Editor_LayoutRows(1)), Editor_BgWraps() };
+		const LevelLayoutSize wanted = { uint16_t(Editor_LayoutCols(0)), uint16_t(Editor_LayoutCols(1)), uint16_t(Editor_LayoutRows(0)), uint16_t(Editor_LayoutRows(1)), Editor_BgWraps(), Editor_BgWrapsY() };
 		uint8_t *file_data = LevelLayout_PackSized(clipped.data(), int(bytes / 0x100), &wanted, &file_size, nullptr); // (the Sonic 3 & Knuckles layout format, then Kosinski: LevelLayout.h)
 		uint8_t *packed = KosEnc(file_data, file_size, &packed_size);
 		free(file_data);

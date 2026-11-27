@@ -32,6 +32,22 @@ static void WriteLive(void) {
 }
 
 static int cursor_x, cursor_y;
+static uint8_t pad_before, ext_before, pad_actions;
+static int move_speed;
+
+uint8_t Editor_TakePadActions(void) {
+    const uint8_t actions = pad_actions;
+    pad_actions = 0;
+    return actions;
+}
+
+// The lowest the cursor and the camera go: the bottom of the level's layout (its rows of 128 pixels: a tall level is more than $800 pixels), $7FF for a level that is not that tall; an object's Y has 12 bits
+int Editor_LevelBottom(void) {
+    int rows = level_layout_fg.rows > level_layout_bg.rows ? level_layout_fg.rows : level_layout_bg.rows;
+    if (rows < LEVEL_LAYOUT_ROWS) rows = LEVEL_LAYOUT_ROWS;
+    const int bottom = rows * 128 - 1;
+    return bottom > 0xFFF ? 0xFFF : bottom;
+}
 
 void Editor_SetCursor(int x, int y) {
     cursor_x = x < 0 ? 0 : x;
@@ -68,13 +84,31 @@ void Editor_Hold(void) {
     HoldColours();
     if (editor_playtest)
         return; // (the player is playing)
-    // The pad (or the keys that stand for it) moves the cursor, and the camera with it: 4 pixels a frame, 16 with a button (A, B or C) held
-    const uint8_t pad = Joypad_GetState1();
-    const int step = (pad & (JPAD_A | JPAD_B | JPAD_C)) ? 16 : 4;
+    // The pad (or the keys that stand for it) is object placement mode's: the D-pad moves the cursor, and the camera with it, faster the longer it is held (debug mode's own ramp); C places, A and Y choose the next and the
+    // previous object, the right stick or [ ] the subtype, B deletes what is under the cursor. The window (Qt side) takes the actions with Editor_TakePadActions: it knows what is chosen
+    const uint8_t pad = Joypad_GetState1(), ext = Joypad_GetExtState1();
+    const uint8_t pressed = (uint8_t)(pad & ~pad_before);
+    const uint8_t ext_pressed = (uint8_t)(ext & ~ext_before);
+    pad_before = pad;
+    ext_before = ext;
+    if (pressed & JPAD_C) pad_actions |= EDITOR_PAD_PLACE;
+    if (pressed & JPAD_B) pad_actions |= EDITOR_PAD_DELETE;
+    if (ext_pressed & JPAD_EXT_Y) pad_actions |= EDITOR_PAD_PREVIOUS;
+    else if (pressed & JPAD_A) pad_actions |= EDITOR_PAD_NEXT;
+    if (ext_pressed & JPAD_EXT_SUBTYPE_DEC) pad_actions |= EDITOR_PAD_SUBTYPE_DEC;
+    if (ext_pressed & JPAD_EXT_SUBTYPE_INC) pad_actions |= EDITOR_PAD_SUBTYPE_INC;
+    const bool moving = (pad & (JPAD_UP | JPAD_DOWN | JPAD_LEFT | JPAD_RIGHT)) != 0;
+    if (moving) {
+        if (move_speed < 16) move_speed++; // (4 pixels a frame at first, 16 after a quarter of a second)
+    } else {
+        move_speed = 0;
+    }
+    const int step = moving ? 4 + (move_speed * 12) / 16 : 0;
     int nx = cursor_x + ((pad & JPAD_RIGHT) ? step : 0) - ((pad & JPAD_LEFT) ? step : 0);
     int ny = cursor_y + ((pad & JPAD_DOWN) ? step : 0) - ((pad & JPAD_UP) ? step : 0);
     nx = nx < 0 ? 0 : (nx > 0x3FFF ? 0x3FFF : nx);
-    ny = ny < 0 ? 0 : (ny > 0x7FF ? 0x7FF : ny);
+    const int bottom = Editor_LevelBottom();
+    ny = ny < 0 ? 0 : (ny > bottom ? bottom : ny);
     cursor_x = nx;
     cursor_y = ny;
     // While the level is edited the player is parked far outside it, so nothing that waits for him to come near (the signpost, the checkpoints, the path swappers, the badniks that go for him...) can be triggered;
@@ -210,7 +244,7 @@ static uint8_t editor_layout[LEVEL_LAYOUT_MAX_ROWS * 0x100];
 static unsigned editor_layout_generation = ~0u;
 static bool editor_layout_changed;
 static int editor_cols[2] = { LEVEL_LAYOUT_COLS, LEVEL_LAYOUT_COLS };
-static bool editor_bg_wraps;
+static bool editor_bg_wraps, editor_bg_wraps_y;
 static int editor_rows[2] = { LEVEL_LAYOUT_ROWS, LEVEL_LAYOUT_ROWS }; // each plane's height: the foreground's and the background's (a background is often shorter than 16 rows)
 static void SyncLayout(void) {
     if (editor_layout_generation != level_layout_generation) { // (another layout has been loaded since)
@@ -223,7 +257,8 @@ static void SyncLayout(void) {
             if (editor_rows[k] > LEVEL_LAYOUT_MAX_ROWS) editor_rows[k] = LEVEL_LAYOUT_MAX_ROWS;
         editor_cols[0] = level_layout_fg.width > 0 ? level_layout_fg.width : LEVEL_LAYOUT_COLS;
         editor_cols[1] = level_layout_bg.width > 0 ? level_layout_bg.width : LEVEL_LAYOUT_COLS;
-        editor_bg_wraps = level_layout_bg.wraps_own_size;
+        editor_bg_wraps = level_layout_bg.wraps_x;
+        editor_bg_wraps_y = level_layout_bg.wraps_y;
     }
 }
 uint8_t *Editor_Layout(size_t *bytes) {
@@ -251,6 +286,15 @@ void Editor_SetBgWraps(bool wraps) {
     editor_bg_wraps = wraps;
     editor_layout_changed = true; // (the planes take it when the picture is redrawn)
 }
+bool Editor_BgWrapsY(void) {
+    SyncLayout();
+    return editor_bg_wraps_y;
+}
+void Editor_SetBgWrapsY(bool wraps) {
+    SyncLayout();
+    editor_bg_wraps_y = wraps;
+    editor_layout_changed = true;
+}
 int Editor_LayoutRows(int plane) {
     SyncLayout();
     return editor_rows[plane & 1];
@@ -276,7 +320,7 @@ void Editor_CommitArt(int tile) {
 
 void Editor_RedrawLevel(void) {
     if (editor_layout_changed && editor_layout_generation == level_layout_generation) {
-        const LevelLayoutSize wanted = { (uint16_t)editor_cols[0], (uint16_t)editor_cols[1], (uint16_t)editor_rows[0], (uint16_t)editor_rows[1], editor_bg_wraps };
+        const LevelLayoutSize wanted = { (uint16_t)editor_cols[0], (uint16_t)editor_cols[1], (uint16_t)editor_rows[0], (uint16_t)editor_rows[1], editor_bg_wraps, editor_bg_wraps_y };
         LevelLayout_FromInterleavedSized(editor_layout, &wanted); // (the planes take what the editor changed)
         editor_layout_changed = false;
     }
